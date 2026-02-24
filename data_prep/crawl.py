@@ -16,7 +16,6 @@ from .utils import (
     safe_filename_from_url,
     write_jsonl,
     looks_like_pdf,
-    looks_like_pdf_bytes,
     looks_like_html_bytes,
 )
 
@@ -66,53 +65,39 @@ class RobotsCache:
             return True
 
 
-async def fetch_with_chromium(
+def _normalize_content_type(ctype: str) -> str:
+    ctype = (ctype or "").strip().lower()
+    if ";" in ctype:
+        ctype = ctype.split(";", 1)[0].strip()
+    return ctype
+
+
+async def fetch_html_with_chromium(
     page, url: str, cfg: CrawlConfig
-) -> Tuple[Optional[bytes], Optional[str], Dict]:
+) -> Tuple[str, Optional[str], Optional[bytes], Dict]:
     """
-    Returns: (content_bytes, content_type, meta)
+    Returns: (final_url, content_type, body_bytes, meta)
+
+    Note: This crawler is intentionally HTML-first. If a URL navigates to a PDF, we do
+    not download it; we return meta that lets the user download it manually.
     """
-    meta = {"final_url": url, "status": None, "content_type": None}
+    meta: Dict = {"final_url": url, "status": None, "content_type": None}
     try:
         resp = await page.goto(
             url, wait_until=cfg.wait_until, timeout=cfg.nav_timeout_ms
         )
         if resp is None:
-            return None, None, meta
+            return url, None, None, meta
         meta["status"] = resp.status
         meta["final_url"] = page.url
-        headers = resp.headers
-        ctype = headers.get("content-type", "")
-        if ";" in ctype:
-            ctype = ctype.split(";", 1)[0].strip().lower()
+        meta["headers"] = resp.headers
+        ctype = _normalize_content_type(resp.headers.get("content-type", ""))
         meta["content_type"] = ctype or None
-        meta["headers"] = headers
-
-        # If PDF, fetch body directly
         body = await resp.body()
-        return body, ctype, meta
+        return page.url, (ctype or None), body, meta
     except Exception as e:
-        # Some downloads (notably PDFs) can fail with net::ERR_ABORTED in page navigation.
-        # Fallback to a direct request fetch when possible.
-        err = repr(e)
-        meta["error"] = err
-        try:
-            if "ERR_ABORTED" in err or "net::ERR_ABORTED" in err:
-                r = await page.request.get(url, timeout=cfg.nav_timeout_ms)
-                meta["status"] = r.status
-                meta["final_url"] = str(r.url)
-                headers = r.headers
-                ctype = headers.get("content-type", "")
-                if ";" in ctype:
-                    ctype = ctype.split(";", 1)[0].strip().lower()
-                meta["content_type"] = ctype or None
-                meta["headers"] = headers
-                meta["fallback"] = "page.request.get"
-                body = await r.body()
-                return body, ctype, meta
-        except Exception as e2:
-            meta["fallback_error"] = repr(e2)
-        return None, None, meta
+        meta["error"] = repr(e)
+        return url, None, None, meta
 
 
 async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
@@ -211,7 +196,9 @@ async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
                     last_fetch[domain] = time.time()
 
                     async with sem:
-                        content, ctype, meta = await fetch_with_chromium(page, url, cfg)
+                        final_url, ctype, body, meta = await fetch_html_with_chromium(
+                            page, url, cfg
+                        )
 
                     seen.add(url)
                     pages_fetched += 1
@@ -227,7 +214,7 @@ async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
                         "meta": meta,
                     }
 
-                    if content is None or ctype is None:
+                    if body is None or ctype is None:
                         if debug:
                             err = meta.get("error")
                             print(
@@ -240,49 +227,47 @@ async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
                         q.task_done()
                         continue
 
-                    # PDF handling: don't trust URL suffix alone; sniff bytes.
-                    maybe_pdf = ctype.startswith("application/pdf") or looks_like_pdf(url)
-                    is_pdf = maybe_pdf and looks_like_pdf_bytes(content)
-                    meta_obj["meta"]["sniffed_is_pdf"] = bool(is_pdf)
-                    if maybe_pdf and not is_pdf:
-                        meta_obj["meta"]["sniff_mismatch"] = True
-
-                    if is_pdf:
-                        fn = safe_filename_from_url(url) + ".pdf"
-                        path = os.path.join(cfg.raw_pdf_dir, fn)
-                        with open(path, "wb") as f:
-                            f.write(content)
-                        meta_obj["saved_path"] = path
-                        meta_obj["kind"] = "pdf"
+                    status = meta.get("status")
+                    if isinstance(status, int) and status >= 400:
+                        meta_obj["kind"] = "error"
                         write_jsonl(cfg.raw_meta_path, meta_obj)
                         q.task_done()
                         continue
 
-                    if not ctype.startswith("text/html"):
-                        # Some servers lie about content-type; save HTML when we can.
-                        if looks_like_html_bytes(content):
-                            ctype = "text/html"
-                            meta_obj["meta"]["content_type_overridden"] = ctype
-                        else:
-                            if debug:
-                                print(
-                                    "[crawl skip] non_html_non_pdf "
-                                    f"url={url} ctype={ctype} status={meta.get('status')}"
-                                )
-                            meta_obj["kind"] = "other"
-                            write_jsonl(cfg.raw_meta_path, meta_obj)
-                            q.task_done()
-                            continue
+                    # If it navigated to (or served) a PDF, ask the user to download it manually.
+                    final_url_str = meta.get("final_url") or final_url
+                    is_pdf = (ctype == "application/pdf") or looks_like_pdf(
+                        final_url_str
+                    )
+                    if is_pdf:
+                        fn = safe_filename_from_url(url) + ".pdf"
+                        path = os.path.join(cfg.raw_pdf_dir, fn)
+                        print(
+                            "[pdf link] "
+                            f"url={url} final_url={final_url_str} "
+                            f"save_as={path}"
+                        )
+                        meta_obj["kind"] = "pdf"
+                        meta_obj["saved_path"] = path
+                        meta_obj["meta"]["manual_download"] = True
+                        write_jsonl(cfg.raw_meta_path, meta_obj)
+                        q.task_done()
+                        continue
+
+                    # Not HTML: skip unless it looks like HTML bytes.
+                    if not ctype.startswith("text/html") and not looks_like_html_bytes(
+                        body
+                    ):
+                        meta_obj["kind"] = "other"
+                        write_jsonl(cfg.raw_meta_path, meta_obj)
+                        q.task_done()
+                        continue
 
                     if cfg.save_rendered_html:
-                        try:
-                            html = await page.content()
-                            meta_obj["meta"]["saved_rendered_html"] = True
-                        except Exception:
-                            html = content.decode("utf-8", errors="ignore")
-                            meta_obj["meta"]["saved_rendered_html"] = False
+                        html = await page.content()
+                        meta_obj["meta"]["saved_rendered_html"] = True
                     else:
-                        html = content.decode("utf-8", errors="ignore")
+                        html = body.decode("utf-8", errors="ignore")
                     fn = safe_filename_from_url(url) + ".html"
                     path = os.path.join(cfg.raw_html_dir, fn)
                     with open(path, "w", encoding="utf-8") as f:
@@ -309,6 +294,13 @@ async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
                             if not is_http_url(nu):
                                 continue
                             if _denied(nu, deny_res):
+                                continue
+                            if looks_like_pdf(nu):
+                                fn = safe_filename_from_url(nu) + ".pdf"
+                                path = os.path.join(cfg.raw_pdf_dir, fn)
+                                print(
+                                    f"[pdf discovered] from={url} pdf={nu} save_as={path}"
+                                )
                                 continue
                             # stay scoped
                             if cfg.allow_domains and not _same_or_subdomain(

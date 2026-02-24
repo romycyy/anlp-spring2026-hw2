@@ -6,3 +6,12 @@ pypdf==5.1.0
 tqdm==4.67.1
 langdetect==1.0.9
 urllib3==2.2.3
+
+# RAG baseline
+numpy<2
+rank-bm25
+sentence-transformers
+transformers==4.43.1
+# macOS Intel (darwin-x64) wheels currently top out at torch 2.2.x on PyPI.
+torch==2.2.2
+sentencepiece

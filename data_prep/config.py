@@ -46,23 +46,20 @@ class CrawlConfig:
     parsed_dir: str = "data/parsed"
     parsed_docs_path: str = "data/parsed/docs.jsonl"
 
+    # RAG artifacts (built from parsed_docs_path)
+    rag_dir: str = "data/parsed/rag"
+    rag_chunks_path: str = "data/parsed/rag/chunks.jsonl"
+    rag_embeddings_path: str = "data/parsed/rag/embeddings.npy"
+
     # Parsing/filtering
     min_text_chars: int = 300
     language: str = "en"  # set None to disable language filter
 
     # Browser
-    headless: bool = True
+    headless: bool = False
     user_agent: str = (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-
-    # Content types
-    allowed_content_types: List[str] = field(
-        default_factory=lambda: [
-            "text/html",
-            "application/pdf",
-        ]
     )
 
     def compiled_deny(self):
