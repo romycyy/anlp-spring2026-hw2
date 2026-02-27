@@ -1,10 +1,9 @@
-"""Dense retrieval: sentence-transformers or BAAI/bge-m3, with optional FAISS index."""
+"""Dense retrieval: sentence-transformers or BAAI/bge-m3 with a FAISS index."""
 from __future__ import annotations
 
 from typing import Optional
 
 import numpy as np
-from tqdm import tqdm
 
 _DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 _BAAI_MODEL_NAME = "BAAI/bge-m3"
@@ -94,23 +93,6 @@ def embed_query(query: str, *, model_name: str = _DEFAULT_MODEL_NAME) -> np.ndar
     return emb.astype(np.float32)
 
 
-def embed_queries(model, questions: list[str]) -> np.ndarray:
-    """Encode a list of queries using an already-loaded model."""
-    if hasattr(model, "encode") and hasattr(model, "tokenize"):
-        # sentence-transformers
-        return np.asarray(
-            model.encode(questions, show_progress_bar=False, convert_to_numpy=True,
-                         normalize_embeddings=True),
-            dtype=np.float32,
-        )
-    else:
-        # BAAI
-        import faiss  # type: ignore[import]
-        emb = model.encode(questions, batch_size=64)["dense_vecs"].astype("float32")
-        faiss.normalize_L2(emb)
-        return emb
-
-
 # ---------------------------------------------------------------------------
 # FAISS index
 # ---------------------------------------------------------------------------
@@ -160,45 +142,3 @@ def dense_search(
             })
         results.append(one_query)
     return results
-
-
-# ---------------------------------------------------------------------------
-# Fallback numpy-only retriever (no FAISS required)
-# ---------------------------------------------------------------------------
-
-def _l2_normalize(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    x = np.asarray(x, dtype=np.float32)
-    denom = np.linalg.norm(x, axis=-1, keepdims=True) + eps
-    return x / denom
-
-
-class DenseRetriever:
-    """Pure-numpy dense retriever (no FAISS dependency)."""
-
-    def __init__(self, doc_embeddings: np.ndarray, id_list: list[str], texts: list[str]):
-        self.doc_embeddings = _l2_normalize(np.asarray(doc_embeddings, dtype=np.float32))
-        self.id_list = id_list
-        self.texts = texts
-
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> list[dict]:
-        q = _l2_normalize(np.asarray(query_embedding, dtype=np.float32).reshape(1, -1))
-        sims = (q @ self.doc_embeddings.T).ravel()
-        top_idx = np.argsort(sims)[::-1][:top_k]
-        results = []
-        for rank, i in enumerate(top_idx, 1):
-            idx = int(i)
-            results.append({
-                "rank": rank,
-                "chunk_id": str(self.id_list[idx]),
-                "score": float(sims[i]),
-                "text": self.texts[idx],
-            })
-        return results
-
-    def search_batch(
-        self, query_embeddings: np.ndarray, top_k: int = 5
-    ) -> list[list[dict]]:
-        return [
-            self.search(q, top_k=top_k)
-            for q in tqdm(query_embeddings, desc="Dense Searching")
-        ]

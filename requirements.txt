@@ -13,14 +13,11 @@ rank-bm25
 sentence-transformers
 transformers==4.43.1
 accelerate
-# macOS Intel (darwin-x64) wheels currently top out at torch 2.2.x on PyPI.
-torch==2.2.2
+torch>=2.0.0
 sentencepiece
 
-# Optional: FAISS for fast dense retrieval (used by build_index.py / run_rag.py)
-# Install the CPU build on most machines; use faiss-gpu if you have a GPU.
-faiss-cpu
+# FAISS for fast dense retrieval (used by build_index.py / run_rag.py)
+faiss-gpu
 
-# Optional: BAAI/bge-m3 embedding model support
-# Pin to 1.2.10 as in the reference repo to avoid API breaks.
+# BAAI/bge-m3 embedding model support (pin to avoid API breaks)
 FlagEmbedding==1.2.10

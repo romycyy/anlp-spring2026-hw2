@@ -2,15 +2,14 @@
 
 Assumes the index has been built via `python3 scripts/build_index.py`.
 
-Supports four retrieval modes:
-  dense    – FAISS dense retrieval only
-  sparse   – BM25 sparse retrieval only
-  weighted – weighted average fusion (min-max normalised dense + sparse)
-  rrf      – Reciprocal Rank Fusion (RRF)
+Supports three retrieval modes:
+  dense   – FAISS dense retrieval only
+  sparse  – BM25 sparse retrieval only
+  rrf     – Reciprocal Rank Fusion (dense + sparse)
 
 Supports two embedding models:
-  sentence-transformers  (default, no extra deps)
-  BAAI                   (requires: pip install FlagEmbedding faiss-cpu)
+  sentence-transformers  (default)
+  BAAI                   (requires: pip install FlagEmbedding)
 """
 
 from __future__ import annotations
@@ -79,7 +78,7 @@ def _load_embeddings(cfg: CrawlConfig, n_chunks: int, *, embed_key: str):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="RAG pipeline – dense / sparse / weighted / rrf"
+        description="RAG pipeline – dense / sparse / rrf"
     )
     ap.add_argument(
         "--question", type=str, default=None, help="Ask a single question and exit."
@@ -94,7 +93,7 @@ def main():
         "--mode",
         type=str,
         default="rrf",
-        choices=["dense", "sparse", "weighted", "rrf"],
+        choices=["dense", "sparse", "rrf"],
         help="Retrieval mode.",
     )
     ap.add_argument(
@@ -105,19 +104,13 @@ def main():
         help="Embedding model to use.",
     )
     ap.add_argument(
-        "--alpha",
-        type=float,
-        default=0.6,
-        help="Dense weight in weighted fusion (0..1). Ignored for rrf/dense/sparse.",
-    )
-    ap.add_argument(
         "--top-k", type=int, default=5, help="Final number of chunks passed to reader."
     )
     ap.add_argument(
         "--candidate-k",
         type=int,
         default=20,
-        help="Candidate pool size per retriever before fusion.",
+        help="Candidate pool size per retriever before RRF fusion.",
     )
     ap.add_argument(
         "--rrf-k", type=int, default=60, help="RRF constant k (default 60)."
@@ -145,13 +138,8 @@ def main():
 
     try:
         import numpy as np
-        from rag_utils.dense_retriever import (
-            DenseRetriever,
-            build_faiss_index,
-            dense_search,
-            embed_query,
-        )
-        from rag_utils.hybrid_retrieval import hybrid_search_single
+        from rag_utils.dense_retriever import build_faiss_index, dense_search, embed_query
+        from rag_utils.hybrid_retrieval import rrf_single
         from rag_utils.reader import answer_question
         from rag_utils.sparse_retriever import SparseRetriever
     except Exception as e:
@@ -164,23 +152,14 @@ def main():
     texts, chunk_ids = _load_chunks(cfg)
     print(f"Loaded {len(texts)} chunks.")
 
-    # Sparse is always built (cheap)
     sparse = SparseRetriever(texts, chunk_ids)
 
-    # Dense index – built only when needed
-    dense_retriever = None
     faiss_index = None
     id_arr = None
-    if args.mode in ("dense", "weighted", "rrf"):
+    if args.mode in ("dense", "rrf"):
         embeddings = _load_embeddings(cfg, len(texts), embed_key=args.embed)
         id_arr = np.array(chunk_ids)
-        try:
-            import faiss  # type: ignore[import]  # noqa: F401
-
-            faiss_index = build_faiss_index(embeddings)
-        except ImportError:
-            print("faiss not available – falling back to numpy DenseRetriever.")
-            dense_retriever = DenseRetriever(embeddings, chunk_ids, texts)
+        faiss_index = build_faiss_index(embeddings)
 
     print(f"\nMode={args.mode} | Embed={args.embed} | top_k={args.top_k}\n")
 
@@ -189,32 +168,15 @@ def main():
         if args.mode == "sparse":
             return sparse.search(q, top_k=args.top_k)
 
-        if args.mode == "dense":
-            q_emb = embed_query(q, model_name=_EMBED_MODEL_MAP[args.embed])
-            if faiss_index is not None:
-                return dense_search(
-                    faiss_index, q_emb, id_arr, texts, top_k=args.top_k
-                )[0]
-            return dense_retriever.search(q_emb, top_k=args.top_k)
-
-        # weighted or rrf – need both
-        sparse_res = sparse.search(q, top_k=args.candidate_k)
         q_emb = embed_query(q, model_name=_EMBED_MODEL_MAP[args.embed])
-        if faiss_index is not None:
-            dense_res = dense_search(
-                faiss_index, q_emb, id_arr, texts, top_k=args.candidate_k
-            )[0]
-        else:
-            dense_res = dense_retriever.search(q_emb, top_k=args.candidate_k)
 
-        return hybrid_search_single(
-            dense_res,
-            sparse_res,
-            alpha=args.alpha,
-            top_k=args.top_k,
-            mode=args.mode,
-            rrf_k=args.rrf_k,
-        )
+        if args.mode == "dense":
+            return dense_search(faiss_index, q_emb, id_arr, texts, top_k=args.top_k)[0]
+
+        # rrf – need both retrievers
+        dense_res = dense_search(faiss_index, q_emb, id_arr, texts, top_k=args.candidate_k)[0]
+        sparse_res = sparse.search(q, top_k=args.candidate_k)
+        return rrf_single(dense_res, sparse_res, top_k=args.top_k, k=args.rrf_k)
 
     def run_and_print(q: str) -> str:
         retrieved = retrieve(q)
