@@ -1,3 +1,5 @@
 tests/
 *__pycache__*
 data/
+test_l_q.json
+test_answer.json

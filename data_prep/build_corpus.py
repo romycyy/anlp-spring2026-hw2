@@ -1,126 +1,76 @@
 import os
-from typing import Dict, Iterable
+from typing import Iterable
 
 from tqdm import tqdm
 
 from .config import CrawlConfig
-from .utils import ensure_dir, read_jsonl, write_jsonl, sha1
+from .utils import ensure_dir, write_jsonl
 from .parse_html import extract_main_text
 from .parse_pdf import parse_pdf
 from .clean import normalize_text, remove_boilerplate_lines, language_ok, detect_language
 from .dedupe import exact_dedupe
 
 
-def build_docs_from_raw(cfg: CrawlConfig) -> Iterable[Dict]:
+def build_docs_from_raw(cfg: CrawlConfig) -> Iterable[dict]:
     debug = os.getenv("PIPELINE_DEBUG", "0") == "1"
-    for rec in read_jsonl(cfg.raw_meta_path):
-        kind = rec.get("kind")
-        url = rec.get("url")
-        source = rec.get("source") or "web"
-        saved_path = rec.get("saved_path")
-        fetched_at = rec.get("fetched_at")
 
-        if not saved_path or not os.path.exists(saved_path):
-            if debug:
-                meta = rec.get("meta", {}) or {}
-                print(
-                    "[raw->doc skip] missing_raw_file "
-                    f"url={url} kind={kind} saved_path={saved_path} "
-                    f"status={meta.get('status')} ctype={meta.get('content_type')} "
-                    f"error={meta.get('error')}"
-                )
+    for domain in os.listdir(cfg.raw_html_dir):
+        domain_dir = os.path.join(cfg.raw_html_dir, domain)
+        if not os.path.isdir(domain_dir):
             continue
-
-        if kind == "html":
-            with open(saved_path, "r", encoding="utf-8", errors="ignore") as f:
-                html = f.read()
-            parsed = extract_main_text(html, url)
-            title, text = parsed.get("title", ""), parsed.get("text", "")
-            date = parsed.get("date")
-            if debug:
-                print(
-                    "[raw->doc html] "
-                    f"url={url} title_len={len(title or '')} text_len={len(text or '')} "
-                    f"raw_path={saved_path}"
-                )
-            yield {
-                "doc_id": sha1(url),
-                "source": source,
-                "url": url,
-                "title": title or "",
-                "text": text or "",
-                "content_type": "text/html",
-                "fetched_at": fetched_at,
-                "metadata": {
-                    "date": date,
-                    "raw_path": saved_path,
-                    "final_url": rec.get("meta", {}).get("final_url"),
-                    "status": rec.get("meta", {}).get("status"),
-                },
-            }
-
-        elif kind == "pdf":
+        for filename in os.listdir(domain_dir):
+            if not filename.endswith((".html", ".htm")):
+                continue
+            path = os.path.join(domain_dir, filename)
             try:
-                parsed = parse_pdf(saved_path)
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    html = f.read()
+                parsed = extract_main_text(html, url=None)
+                text = parsed.get("text", "")
             except Exception as e:
                 if debug:
-                    print(
-                        "[raw->doc pdf] parse_error "
-                        f"url={url} raw_path={saved_path} error={repr(e)}"
-                    )
-                parsed = {"title": "", "text": ""}
-            title, text = parsed.get("title", ""), parsed.get("text", "")
+                    print(f"[html parse error] path={path} error={repr(e)}")
+                continue
             if debug:
-                print(
-                    "[raw->doc pdf] "
-                    f"url={url} title_len={len(title or '')} text_len={len(text or '')} "
-                    f"raw_path={saved_path}"
-                )
-            yield {
-                "doc_id": sha1(url),
-                "source": source,
-                "url": url,
-                "title": title or "",
-                "text": text or "",
-                "content_type": "application/pdf",
-                "fetched_at": fetched_at,
-                "metadata": {"raw_path": saved_path},
-            }
-        else:
+                print(f"[html] path={path} text_len={len(text)}")
+            yield {"text": text}
+
+    for filename in os.listdir(cfg.raw_pdf_dir):
+        if not filename.lower().endswith(".pdf"):
+            continue
+        path = os.path.join(cfg.raw_pdf_dir, filename)
+        try:
+            parsed = parse_pdf(path)
+            text = parsed.get("text", "")
+        except Exception as e:
             if debug:
-                print(f"[raw->doc skip] unsupported_kind url={url} kind={kind}")
+                print(f"[pdf parse error] path={path} error={repr(e)}")
+            continue
+        if debug:
+            print(f"[pdf] path={path} text_len={len(text)}")
+        yield {"text": text}
 
 
-def clean_filter_docs(cfg: CrawlConfig, docs: Iterable[Dict]) -> Iterable[Dict]:
+def clean_filter_docs(cfg: CrawlConfig, docs: Iterable[dict]) -> Iterable[dict]:
     debug = os.getenv("PIPELINE_DEBUG", "0") == "1"
     for d in docs:
-        url = d.get("url")
         text = d.get("text", "")
         text = remove_boilerplate_lines(text)
         text = normalize_text(text)
         if len(text) < cfg.min_text_chars:
             if debug:
-                print(
-                    "[doc filter] too_short "
-                    f"url={url} len={len(text)} min={cfg.min_text_chars}"
-                )
+                print(f"[doc filter] too_short len={len(text)} min={cfg.min_text_chars}")
             continue
         if not language_ok(text[:2000], cfg.language):
             if debug:
                 detected = detect_language(text[:2000])
-                print(
-                    "[doc filter] language_mismatch "
-                    f"url={url} detected={detected} expected={cfg.language}"
-                )
+                print(f"[doc filter] language_mismatch detected={detected} expected={cfg.language}")
             continue
-        d["text"] = text
-        d["title"] = normalize_text(d.get("title", ""))
-        yield d
+        yield {"text": text}
 
 
 def build_corpus(cfg: CrawlConfig) -> None:
     ensure_dir(cfg.parsed_dir)
-    # reset output
     if os.path.exists(cfg.parsed_docs_path):
         os.remove(cfg.parsed_docs_path)
 
@@ -130,7 +80,7 @@ def build_corpus(cfg: CrawlConfig) -> None:
 
     n = 0
     for d in tqdm(deduped, desc="Writing docs.jsonl"):
-        write_jsonl(cfg.parsed_docs_path, d)
+        write_jsonl(cfg.parsed_docs_path, {"text": d["text"]})
         n += 1
 
     print(f"✅ Wrote {n} docs to {cfg.parsed_docs_path}")

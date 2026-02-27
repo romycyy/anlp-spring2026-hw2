@@ -269,7 +269,9 @@ async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
                     else:
                         html = body.decode("utf-8", errors="ignore")
                     fn = safe_filename_from_url(url) + ".html"
-                    path = os.path.join(cfg.raw_html_dir, fn)
+                    domain_dir = os.path.join(cfg.raw_html_dir, domain)
+                    ensure_dir(domain_dir)
+                    path = os.path.join(domain_dir, fn)
                     with open(path, "w", encoding="utf-8") as f:
                         f.write(html)
                     meta_obj["saved_path"] = path

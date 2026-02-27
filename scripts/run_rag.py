@@ -1,173 +1,281 @@
+"""Run the RAG pipeline: retrieve and generate answers.
+
+Assumes the index has been built via `python3 scripts/build_index.py`.
+
+Supports four retrieval modes:
+  dense    – FAISS dense retrieval only
+  sparse   – BM25 sparse retrieval only
+  weighted – weighted average fusion (min-max normalised dense + sparse)
+  rrf      – Reciprocal Rank Fusion (RRF)
+
+Supports two embedding models:
+  sentence-transformers  (default, no extra deps)
+  BAAI                   (requires: pip install FlagEmbedding faiss-cpu)
+"""
+
 from __future__ import annotations
 
 import argparse
-import os
+import json
 import sys
 from pathlib import Path
 
-# Allow running as `python3 scripts/run_rag.py` from anywhere.
 _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from data_prep.config import CrawlConfig  # noqa: E402
-from data_prep.utils import ensure_dir, read_jsonl, write_jsonl  # noqa: E402
+from data_prep.utils import ensure_dir, read_jsonl  # noqa: E402
+
+_EMBED_MODEL_MAP = {
+    "sentence-transformers": "sentence-transformers/all-MiniLM-L6-v2",
+    "BAAI": "BAAI/bge-m3",
+}
 
 
-def _load_or_build_chunks(cfg: CrawlConfig, *, chunk_size: int, overlap: int, rebuild: bool):
-    from rag_utils.chunking import chunk_text
+# ---------------------------------------------------------------------------
+# Index helpers
+# ---------------------------------------------------------------------------
 
-    ensure_dir(cfg.rag_dir)
 
-    if os.path.exists(cfg.rag_chunks_path) and not rebuild:
-        chunks = []
-        metas = []
-        for rec in read_jsonl(cfg.rag_chunks_path):
-            chunks.append(rec["text"])
-            metas.append({k: v for k, v in rec.items() if k != "text"})
-        if chunks:
-            return chunks, metas
-
-    # Build from docs.jsonl produced by data prep.
-    if not os.path.exists(cfg.parsed_docs_path):
+def _load_chunks(cfg: CrawlConfig) -> tuple[list[str], list[str]]:
+    """Return (texts, chunk_ids) loaded from disk; raise if file is missing."""
+    if not Path(cfg.rag_chunks_path).exists():
         raise FileNotFoundError(
-            f"Could not find parsed docs at {cfg.parsed_docs_path}. "
-            "Run `python3 scripts/run_pipeline.py` first."
+            f"Chunks file not found at {cfg.rag_chunks_path}. "
+            "Run `python3 scripts/build_index.py` first."
         )
-
-    # Reset chunks output.
-    if os.path.exists(cfg.rag_chunks_path):
-        os.remove(cfg.rag_chunks_path)
-
-    chunks: list[str] = []
-    metas: list[dict] = []
-
-    for doc in read_jsonl(cfg.parsed_docs_path):
-        doc_id = doc.get("doc_id")
-        text = doc.get("text") or ""
-        if not doc_id or not text.strip():
-            continue
-
-        doc_chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
-        for i, ch in enumerate(doc_chunks):
-            rec = {
-                "chunk_id": f"{doc_id}:{i}",
-                "doc_id": doc_id,
-                "text": ch,
-            }
-            write_jsonl(cfg.rag_chunks_path, rec)
-            chunks.append(ch)
-            metas.append({k: v for k, v in rec.items() if k != "text"})
-
-    if not chunks:
-        raise ValueError(
-            f"No chunks were produced from {cfg.parsed_docs_path}. "
-            "Check that your corpus has non-empty `text` fields."
-        )
-    return chunks, metas
+    texts, chunk_ids = [], []
+    for rec in read_jsonl(cfg.rag_chunks_path):
+        texts.append(rec["text"])
+        chunk_ids.append(rec["chunk_id"])
+    if not texts:
+        raise ValueError(f"No chunks found in {cfg.rag_chunks_path}.")
+    return texts, chunk_ids
 
 
-def _load_or_build_embeddings(
-    cfg: CrawlConfig,
-    chunks: list[str],
-    *,
-    rebuild: bool,
-):
+def _load_embeddings(cfg: CrawlConfig, n_chunks: int, *, embed_key: str):
     import numpy as np
-    from rag_utils.dense_retriever import embed_texts
 
-    if os.path.exists(cfg.rag_embeddings_path) and not rebuild:
-        emb = np.load(cfg.rag_embeddings_path)
-        if emb.shape[0] == len(chunks):
-            return emb
-
-    ensure_dir(cfg.rag_dir)
-    emb = embed_texts(chunks, show_progress_bar=True)
-    np.save(cfg.rag_embeddings_path, emb)
+    emb_path = cfg.rag_embeddings_path.replace(".npy", f"_{embed_key}.npy")
+    if not Path(emb_path).exists():
+        raise FileNotFoundError(
+            f"Embeddings file not found at {emb_path}. "
+            f"Run `python3 scripts/build_index.py --embed {embed_key}` first."
+        )
+    emb = np.load(emb_path)
+    if emb.shape[0] != n_chunks:
+        raise ValueError(
+            f"Embeddings shape {emb.shape} does not match chunk count {n_chunks}. "
+            "Re-run `python3 scripts/build_index.py` to rebuild."
+        )
     return emb
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Run a simple RAG baseline over data/parsed/docs.jsonl")
-    ap.add_argument("--question", type=str, default=None, help="Ask one question and exit.")
-    ap.add_argument("--alpha", type=float, default=0.5, help="Hybrid weight on sparse scores (0..1).")
-    ap.add_argument("--top-k", type=int, default=3, help="Final number of chunks passed to reader.")
+    ap = argparse.ArgumentParser(
+        description="RAG pipeline – dense / sparse / weighted / rrf"
+    )
+    ap.add_argument(
+        "--question", type=str, default=None, help="Ask a single question and exit."
+    )
+    ap.add_argument(
+        "--queries-file",
+        type=str,
+        default=None,
+        help="JSON file with list of {id, question} objects (e.g. leaderboard_queries.json).",
+    )
+    ap.add_argument(
+        "--mode",
+        type=str,
+        default="rrf",
+        choices=["dense", "sparse", "weighted", "rrf"],
+        help="Retrieval mode.",
+    )
+    ap.add_argument(
+        "--embed",
+        type=str,
+        default="sentence-transformers",
+        choices=["sentence-transformers", "BAAI"],
+        help="Embedding model to use.",
+    )
+    ap.add_argument(
+        "--alpha",
+        type=float,
+        default=0.6,
+        help="Dense weight in weighted fusion (0..1). Ignored for rrf/dense/sparse.",
+    )
+    ap.add_argument(
+        "--top-k", type=int, default=5, help="Final number of chunks passed to reader."
+    )
     ap.add_argument(
         "--candidate-k",
         type=int,
         default=20,
-        help="Candidate pool size for sparse+dense before hybrid fusion.",
+        help="Candidate pool size per retriever before fusion.",
     )
-    ap.add_argument("--chunk-size", type=int, default=200, help="Chunk size in whitespace tokens.")
-    ap.add_argument("--chunk-overlap", type=int, default=50, help="Chunk overlap in tokens.")
+    ap.add_argument(
+        "--rrf-k", type=int, default=60, help="RRF constant k (default 60)."
+    )
     ap.add_argument(
         "--reader-model",
         type=str,
         default="Qwen/Qwen2.5-1.5B-Instruct",
-        help="HF model name for the reader (seq2seq or causal).",
+        help="HF model name for the reader.",
+    )
+    ap.add_argument("--max-new-tokens", type=int, default=256)
+    ap.add_argument(
+        "--max-context-chars",
+        type=int,
+        default=10_000,
+        help="Max characters of retrieved context passed to reader.",
     )
     ap.add_argument(
-        "--rebuild-index",
-        action="store_true",
-        help="Rebuild chunks/embeddings even if cached files exist.",
+        "--output",
+        type=str,
+        default=None,
+        help="Path to save JSON output (system_outputs/).",
     )
     args = ap.parse_args()
 
-    # Heavy deps (sentence-transformers/torch/transformers) are imported after argparse
-    # so `--help` works even before installing optional ML packages.
     try:
-        from rag_utils.dense_retriever import DenseRetriever, embed_query
-        from rag_utils.hybrid_retrieval import hybrid_search
+        import numpy as np
+        from rag_utils.dense_retriever import (
+            DenseRetriever,
+            build_faiss_index,
+            dense_search,
+            embed_query,
+        )
+        from rag_utils.hybrid_retrieval import hybrid_search_single
         from rag_utils.reader import answer_question
         from rag_utils.sparse_retriever import SparseRetriever
     except Exception as e:
-        msg = (
-            "Failed to import RAG ML dependencies.\n\n"
-            f"Import error: {repr(e)}\n\n"
-            "This is usually caused by incompatible package versions. In particular:\n"
-            "- NumPy should be < 2 (many PyTorch wheels are built against NumPy 1.x)\n"
-            "- On macOS Intel (darwin-x64), torch wheels on PyPI commonly top out at 2.2.x\n\n"
-            "Fix by reinstalling with the pinned versions in requirements.txt:\n"
-            "  pip install -U -r requirements.txt\n"
-        )
-        raise SystemExit(msg) from e
+        raise SystemExit(
+            f"Failed to import RAG ML dependencies.\nImport error: {repr(e)}\n"
+            "Fix: pip install -U -r requirements.txt"
+        ) from e
 
     cfg = CrawlConfig()
+    texts, chunk_ids = _load_chunks(cfg)
+    print(f"Loaded {len(texts)} chunks.")
 
-    chunks, metas = _load_or_build_chunks(
-        cfg, chunk_size=args.chunk_size, overlap=args.chunk_overlap, rebuild=args.rebuild_index
-    )
-    embeddings = _load_or_build_embeddings(cfg, chunks, rebuild=args.rebuild_index)
+    # Sparse is always built (cheap)
+    sparse = SparseRetriever(texts, chunk_ids)
 
-    sparse = SparseRetriever(chunks)
-    dense = DenseRetriever(embeddings)
+    # Dense index – built only when needed
+    dense_retriever = None
+    faiss_index = None
+    id_arr = None
+    if args.mode in ("dense", "weighted", "rrf"):
+        embeddings = _load_embeddings(cfg, len(texts), embed_key=args.embed)
+        id_arr = np.array(chunk_ids)
+        try:
+            import faiss  # type: ignore[import]  # noqa: F401
 
-    def answer(q: str):
+            faiss_index = build_faiss_index(embeddings)
+        except ImportError:
+            print("faiss not available – falling back to numpy DenseRetriever.")
+            dense_retriever = DenseRetriever(embeddings, chunk_ids, texts)
+
+    print(f"\nMode={args.mode} | Embed={args.embed} | top_k={args.top_k}\n")
+
+    def retrieve(q: str) -> list[dict]:
+        """Run the selected retrieval mode for a single query."""
+        if args.mode == "sparse":
+            return sparse.search(q, top_k=args.top_k)
+
+        if args.mode == "dense":
+            q_emb = embed_query(q, model_name=_EMBED_MODEL_MAP[args.embed])
+            if faiss_index is not None:
+                return dense_search(
+                    faiss_index, q_emb, id_arr, texts, top_k=args.top_k
+                )[0]
+            return dense_retriever.search(q_emb, top_k=args.top_k)
+
+        # weighted or rrf – need both
         sparse_res = sparse.search(q, top_k=args.candidate_k)
-        dense_ranks, _dense_scores = dense.search(embed_query(q), top_k=args.candidate_k)
-        final_indices = hybrid_search(
-            sparse_res, list(dense_ranks), alpha=args.alpha, top_k=args.top_k
+        q_emb = embed_query(q, model_name=_EMBED_MODEL_MAP[args.embed])
+        if faiss_index is not None:
+            dense_res = dense_search(
+                faiss_index, q_emb, id_arr, texts, top_k=args.candidate_k
+            )[0]
+        else:
+            dense_res = dense_retriever.search(q_emb, top_k=args.candidate_k)
+
+        return hybrid_search_single(
+            dense_res,
+            sparse_res,
+            alpha=args.alpha,
+            top_k=args.top_k,
+            mode=args.mode,
+            rrf_k=args.rrf_k,
         )
 
-        top_chunks = [chunks[i] for i in final_indices]
-        ans = answer_question(q, top_chunks, model_name=args.reader_model)
+    def run_and_print(q: str) -> str:
+        retrieved = retrieve(q)
+        ans = answer_question(
+            q,
+            retrieved,
+            model_name=args.reader_model,
+            max_new_tokens=args.max_new_tokens,
+            max_context_chars=args.max_context_chars,
+        )
+        print(f"\nAnswer:\n{ans}\n")
+        return ans
 
-        # Print answer only (no sources for now).
-        print("\nAnswer:\n", ans, "\n", sep="")
-
+    # ------------------------------------------------------------------
+    # Single question mode
+    # ------------------------------------------------------------------
     if args.question:
-        answer(args.question)
+        run_and_print(args.question)
         return
 
+    # ------------------------------------------------------------------
+    # Batch queries from file (e.g. leaderboard_queries.json)
+    # ------------------------------------------------------------------
+    if args.queries_file:
+        with open(args.queries_file, "r", encoding="utf-8") as f:
+            queries = json.load(f)
+
+        results: dict[str, str] = {}
+        for item in queries:
+            qid = str(item.get("id", item.get("qid", "")))
+            question = item.get("question", item.get("query", ""))
+            if not question:
+                continue
+            print(f"[{qid}] {question}")
+            ans = run_and_print(question)
+            results[qid] = ans
+
+        output_path = args.output
+        if not output_path:
+            ensure_dir("system_outputs")
+            output_path = (
+                f"system_outputs/system_output_{args.embed}_{args.mode}"
+                f"_{args.top_k}.json"
+            )
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"\nSaved {len(results)} answers to {output_path}")
+        return
+
+    # ------------------------------------------------------------------
+    # Interactive mode
+    # ------------------------------------------------------------------
     while True:
         try:
-            q = input("\nAsk a question (or Ctrl-D to quit): ").strip()
+            q = input("\nAsk a question (Ctrl-D to quit): ").strip()
         except EOFError:
             print()
             break
         if not q:
             continue
-        answer(q)
+        run_and_print(q)
 
 
 if __name__ == "__main__":
