@@ -17,7 +17,9 @@ torch>=2.0.0
 sentencepiece
 
 # FAISS for fast dense retrieval (used by build_index.py / run_rag.py)
-faiss-gpu
+# faiss-gpu is abandoned on PyPI and only supports Python <3.11.
+# Use faiss-cpu (works everywhere) or faiss-gpu-cu12 on CUDA 12 machines.
+faiss-gpu-cu12
 
 # BAAI/bge-m3 embedding model support (pin to avoid API breaks)
 FlagEmbedding==1.2.10
