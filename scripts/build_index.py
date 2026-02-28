@@ -22,7 +22,7 @@ import numpy as np  # noqa: E402
 
 from data_prep.config import CrawlConfig  # noqa: E402
 from data_prep.utils import ensure_dir, read_jsonl, write_jsonl  # noqa: E402
-from rag_utils.chunking import chunk_text  # noqa: E402
+from rag_utils.chunking import chunk_text, semantic_chunk_text  # noqa: E402
 from rag_utils.dense_retriever import embed_texts  # noqa: E402
 
 _EMBED_MODEL_MAP = {
@@ -40,8 +40,21 @@ def main():
         choices=["sentence-transformers", "BAAI"],
         help="Embedding model to use.",
     )
-    ap.add_argument("--chunk-size", type=int, default=200)
-    ap.add_argument("--chunk-overlap", type=int, default=50)
+    ap.add_argument(
+        "--chunking",
+        type=str,
+        default="fixed",
+        choices=["fixed", "semantic"],
+        help="Chunking strategy: 'fixed' (token-based) or 'semantic' (embedding-based).",
+    )
+    ap.add_argument("--chunk-size", type=int, default=200,
+                    help="Max tokens per chunk (fixed) / hard cap (semantic).")
+    ap.add_argument("--chunk-overlap", type=int, default=50,
+                    help="Token overlap between chunks (fixed chunking only).")
+    ap.add_argument("--semantic-buffer", type=int, default=1,
+                    help="Sentence buffer size for context windows (semantic chunking).")
+    ap.add_argument("--semantic-percentile", type=int, default=95,
+                    help="Breakpoint percentile threshold (semantic chunking).")
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument(
         "--rebuild",
@@ -52,44 +65,63 @@ def main():
 
     cfg = CrawlConfig()
     model_name = _EMBED_MODEL_MAP[args.embed]
-    emb_path = cfg.rag_embeddings_path.replace(".npy", f"_{args.embed}.npy")
+
+    # Use distinct file names per chunking strategy so both can coexist.
+    chunks_path = cfg.rag_chunks_path
+    if args.chunking == "semantic":
+        chunks_path = cfg.rag_chunks_path.replace(".jsonl", "_semantic.jsonl")
+
+    emb_path = cfg.rag_embeddings_path.replace(
+        ".npy", f"_{args.embed}_{args.chunking}.npy"
+    )
 
     ensure_dir(cfg.rag_dir)
 
     # ------------------------------------------------------------------
     # 1. Build / load chunks
     # ------------------------------------------------------------------
-    if os.path.exists(cfg.rag_chunks_path) and not args.rebuild:
-        print(f"Loading existing chunks from {cfg.rag_chunks_path} …")
-        chunk_records = list(read_jsonl(cfg.rag_chunks_path))
+    if os.path.exists(chunks_path) and not args.rebuild:
+        print(f"Loading existing chunks from {chunks_path} …")
+        chunk_records = list(read_jsonl(chunks_path))
     else:
         if not os.path.exists(cfg.parsed_docs_path):
             raise FileNotFoundError(
                 f"Parsed docs not found at {cfg.parsed_docs_path}. "
                 "Run `python3 scripts/run_pipeline.py` first."
             )
-        if os.path.exists(cfg.rag_chunks_path):
-            os.remove(cfg.rag_chunks_path)
+        if os.path.exists(chunks_path):
+            os.remove(chunks_path)
 
-        print("Chunking docs …")
+        print(f"Chunking docs (strategy={args.chunking}) …")
         chunk_records = []
         for idx, doc in enumerate(read_jsonl(cfg.parsed_docs_path)):
             doc_id = doc.get("doc_id") or doc.get("id") or f"doc_{idx}"
             text = doc.get("text") or ""
             if not text.strip():
                 continue
-            for i, ch in enumerate(
-                chunk_text(text, chunk_size=args.chunk_size, overlap=args.chunk_overlap)
-            ):
+
+            if args.chunking == "semantic":
+                chunks = semantic_chunk_text(
+                    text,
+                    buffer_size=args.semantic_buffer,
+                    breakpoint_percentile=args.semantic_percentile,
+                    max_chunk_tokens=args.chunk_size,
+                )
+            else:
+                chunks = chunk_text(
+                    text, chunk_size=args.chunk_size, overlap=args.chunk_overlap
+                )
+
+            for i, ch in enumerate(chunks):
                 rec = {
                     "chunk_id": f"{doc_id}:{i}",
                     "doc_id": doc_id,
                     "text": ch,
                 }
-                write_jsonl(cfg.rag_chunks_path, rec)
+                write_jsonl(chunks_path, rec)
                 chunk_records.append(rec)
 
-        print(f"Created {len(chunk_records)} chunks → {cfg.rag_chunks_path}")
+        print(f"Created {len(chunk_records)} chunks → {chunks_path}")
 
     texts = [r["text"] for r in chunk_records]
     ids = np.array([r["chunk_id"] for r in chunk_records])

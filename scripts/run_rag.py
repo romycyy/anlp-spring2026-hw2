@@ -37,30 +37,40 @@ _EMBED_MODEL_MAP = {
 # ---------------------------------------------------------------------------
 
 
-def _load_chunks(cfg: CrawlConfig) -> tuple[list[str], list[str]]:
+def _resolve_paths(cfg: CrawlConfig, embed_key: str, chunking: str) -> tuple[str, str]:
+    """Return (chunks_path, emb_path) for the given embed / chunking combo."""
+    chunks_path = cfg.rag_chunks_path
+    if chunking == "semantic":
+        chunks_path = cfg.rag_chunks_path.replace(".jsonl", "_semantic.jsonl")
+    emb_path = cfg.rag_embeddings_path.replace(".npy", f"_{embed_key}_{chunking}.npy")
+    return chunks_path, emb_path
+
+
+def _load_chunks(cfg: CrawlConfig, chunking: str = "fixed") -> tuple[list[str], list[str]]:
     """Return (texts, chunk_ids) loaded from disk; raise if file is missing."""
-    if not Path(cfg.rag_chunks_path).exists():
+    chunks_path, _ = _resolve_paths(cfg, "", chunking)
+    if not Path(chunks_path).exists():
         raise FileNotFoundError(
-            f"Chunks file not found at {cfg.rag_chunks_path}. "
-            "Run `python3 scripts/build_index.py` first."
+            f"Chunks file not found at {chunks_path}. "
+            f"Run `python3 scripts/build_index.py --chunking {chunking}` first."
         )
     texts, chunk_ids = [], []
-    for rec in read_jsonl(cfg.rag_chunks_path):
+    for rec in read_jsonl(chunks_path):
         texts.append(rec["text"])
         chunk_ids.append(rec["chunk_id"])
     if not texts:
-        raise ValueError(f"No chunks found in {cfg.rag_chunks_path}.")
+        raise ValueError(f"No chunks found in {chunks_path}.")
     return texts, chunk_ids
 
 
-def _load_embeddings(cfg: CrawlConfig, n_chunks: int, *, embed_key: str):
+def _load_embeddings(cfg: CrawlConfig, n_chunks: int, *, embed_key: str, chunking: str = "fixed"):
     import numpy as np
 
-    emb_path = cfg.rag_embeddings_path.replace(".npy", f"_{embed_key}.npy")
+    _, emb_path = _resolve_paths(cfg, embed_key, chunking)
     if not Path(emb_path).exists():
         raise FileNotFoundError(
             f"Embeddings file not found at {emb_path}. "
-            f"Run `python3 scripts/build_index.py --embed {embed_key}` first."
+            f"Run `python3 scripts/build_index.py --embed {embed_key} --chunking {chunking}` first."
         )
     emb = np.load(emb_path)
     if emb.shape[0] != n_chunks:
@@ -102,6 +112,13 @@ def main():
         default="sentence-transformers",
         choices=["sentence-transformers", "BAAI"],
         help="Embedding model to use.",
+    )
+    ap.add_argument(
+        "--chunking",
+        type=str,
+        default="fixed",
+        choices=["fixed", "semantic"],
+        help="Chunking strategy used when building the index.",
     )
     ap.add_argument(
         "--top-k", type=int, default=5, help="Final number of chunks passed to reader."
@@ -149,7 +166,7 @@ def main():
         ) from e
 
     cfg = CrawlConfig()
-    texts, chunk_ids = _load_chunks(cfg)
+    texts, chunk_ids = _load_chunks(cfg, chunking=args.chunking)
     print(f"Loaded {len(texts)} chunks.")
 
     sparse = SparseRetriever(texts, chunk_ids)
@@ -157,11 +174,12 @@ def main():
     faiss_index = None
     id_arr = None
     if args.mode in ("dense", "rrf"):
-        embeddings = _load_embeddings(cfg, len(texts), embed_key=args.embed)
+        embeddings = _load_embeddings(cfg, len(texts), embed_key=args.embed,
+                                      chunking=args.chunking)
         id_arr = np.array(chunk_ids)
         faiss_index = build_faiss_index(embeddings)
 
-    print(f"\nMode={args.mode} | Embed={args.embed} | top_k={args.top_k}\n")
+    print(f"\nMode={args.mode} | Embed={args.embed} | Chunking={args.chunking} | top_k={args.top_k}\n")
 
     def retrieve(q: str) -> list[dict]:
         """Run the selected retrieval mode for a single query."""
@@ -219,7 +237,7 @@ def main():
             ensure_dir("system_outputs")
             output_path = (
                 f"system_outputs/system_output_{args.embed}_{args.mode}"
-                f"_{args.top_k}.json"
+                f"_{args.chunking}_{args.top_k}.json"
             )
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)

@@ -7,7 +7,7 @@ from .config import CrawlConfig
 from .utils import ensure_dir, write_jsonl
 from .parse_html import extract_main_text
 from .parse_pdf import parse_pdf
-from .clean import normalize_text, remove_boilerplate_lines, language_ok, detect_language
+from .clean import normalize_text, remove_boilerplate_lines, remove_wikipedia_artifacts, language_ok, detect_language
 from .dedupe import exact_dedupe
 
 
@@ -56,6 +56,7 @@ def clean_filter_docs(cfg: CrawlConfig, docs: Iterable[dict]) -> Iterable[dict]:
     for d in docs:
         text = d.get("text", "")
         text = remove_boilerplate_lines(text)
+        text = remove_wikipedia_artifacts(text)
         text = normalize_text(text)
         if len(text) < cfg.min_text_chars:
             if debug:
