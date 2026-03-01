@@ -10,7 +10,7 @@ class CrawlConfig:
 
     # Crawl controls
     max_pages: int = 2000
-    max_depth: int = 0
+    max_depth: int = 1
     concurrency: int = 3  # chromium is heavy; keep small
     per_domain_delay_s: float = 1.0
     nav_timeout_ms: int = 30000

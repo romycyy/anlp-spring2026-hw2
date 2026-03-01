@@ -117,6 +117,10 @@ async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
     seen: Set[str] = set()
     pages_fetched = 0
 
+    # URLs that failed or were blocked (domain, url, status_or_reason) for manual-download summary
+    # status: int = HTTP status; None = fetch failed; -1 = robots.txt disallow
+    blocked_or_failed: List[Tuple[str, str, Optional[int]]] = []
+
     # Per-domain delay tracking
     last_fetch: Dict[str, float] = {}
 
@@ -184,6 +188,9 @@ async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
                     if cfg.obey_robots and not robots.can_fetch(url, cfg.user_agent):
                         if debug:
                             print(f"[crawl skip] robots_disallow url={url}")
+                        domain_dir = os.path.join(cfg.raw_html_dir, domain)
+                        ensure_dir(domain_dir)
+                        blocked_or_failed.append((domain, url, -1))  # -1 = robots.txt disallow
                         q.task_done()
                         continue
 
@@ -223,6 +230,10 @@ async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
                                 f"status={meta.get('status')} ctype={meta.get('content_type')} "
                                 f"error={err}"
                             )
+                        # Create domain dir so user can add files manually
+                        domain_dir = os.path.join(cfg.raw_html_dir, domain)
+                        ensure_dir(domain_dir)
+                        blocked_or_failed.append((domain, url, meta.get("status")))
                         write_jsonl(cfg.raw_meta_path, meta_obj)
                         q.task_done()
                         continue
@@ -230,6 +241,10 @@ async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
                     status = meta.get("status")
                     if isinstance(status, int) and status >= 400:
                         meta_obj["kind"] = "error"
+                        # Create domain dir so user can add files manually
+                        domain_dir = os.path.join(cfg.raw_html_dir, domain)
+                        ensure_dir(domain_dir)
+                        blocked_or_failed.append((domain, url, status))
                         write_jsonl(cfg.raw_meta_path, meta_obj)
                         q.task_done()
                         continue
@@ -330,3 +345,27 @@ async def crawl(cfg: CrawlConfig, seed_urls: List[str]) -> None:
 
         await context.close()
         await browser.close()
+
+    # Report websites that failed or blocked the crawler so user can manually download
+    if blocked_or_failed:
+        # Dedupe by URL for cleaner output
+        seen_urls: Set[str] = set()
+        print("\n" + "=" * 60)
+        print("The following URLs could not be fetched (blocked or error).")
+        print("A directory was created for each domain. Please download content")
+        print("manually and place HTML/files in the directory shown.")
+        print("=" * 60)
+        for domain, url, status in blocked_or_failed:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            domain_dir = os.path.join(cfg.raw_html_dir, domain)
+            if status == -1:
+                status_str = " (robots.txt disallow)"
+            elif status is not None:
+                status_str = f" (HTTP {status})"
+            else:
+                status_str = ""
+            print(f"  {url}{status_str}")
+            print(f"    -> Directory: {domain_dir}")
+        print("=" * 60 + "\n")

@@ -13,7 +13,7 @@ from transformers import (
     GenerationConfig,
 )
 
-_DEFAULT_MODEL = "google/gemma-2-27b-it"
+_DEFAULT_MODEL = "Qwen/Qwen2.5-14B-Instruct"
 
 # Character-based context budget (mirrors reference repo's MAX_CONTEXT_CHARS).
 MAX_CONTEXT_CHARS: int = 10_000
@@ -22,9 +22,11 @@ MAX_CONTEXT_CHARS: int = 10_000
 PROMPT_TEMPLATE = """\
 Your task:
 1. Read the question and the retrieved context carefully.
-2. If the retrieved context is missing or irrelevant, answer based on your reliable external knowledge.
-3. Do NOT introduce unrelated facts or hallucinate.
-4. Answer clearly and concisely in English.
+2. If the retrieved context is missing or irrelevant, answer based on your external knowledge.
+3. Answer clearly and concisely in English.
+1. Read the question and the retrieved context carefully.
+2. If the retrieved context is missing or irrelevant, answer based on your external knowledge.
+3. Answer clearly and concisely in English.
 
 Question:
 {question}
@@ -33,7 +35,8 @@ Retrieved Context:
 {context}
 
 Answer:
-Provide the final answer below. Do not show your reasoning steps.
+Provide the final answer below in English. Do not show your reasoning steps.
+Provide the final answer below in English. Do not show your reasoning steps.
 """
 
 _tokenizer = None

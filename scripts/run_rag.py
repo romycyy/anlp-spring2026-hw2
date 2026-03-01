@@ -135,7 +135,7 @@ def main():
     ap.add_argument(
         "--reader-model",
         type=str,
-        default="google/gemma-2-27b-it",
+        default="Qwen/Qwen2.5-14B-Instruct",
         help="HF model name for the reader.",
     )
     ap.add_argument("--max-new-tokens", type=int, default=256)

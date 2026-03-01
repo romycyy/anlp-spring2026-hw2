@@ -37,7 +37,7 @@ def main():
     asyncio.run(crawl(cfg, seed_urls))
 
     # 2) Parse + clean + dedupe => docs.jsonl
-    build_corpus(cfg)
+    # build_corpus(cfg)
 
 
 if __name__ == "__main__":
