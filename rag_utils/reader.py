@@ -13,7 +13,7 @@ from transformers import (
     GenerationConfig,
 )
 
-_DEFAULT_MODEL = "Qwen/Qwen2.5-14B-Instruct"
+_DEFAULT_MODEL = "google/gemma-2-27b-it"
 
 # Character-based context budget (mirrors reference repo's MAX_CONTEXT_CHARS).
 MAX_CONTEXT_CHARS: int = 10_000
@@ -22,10 +22,9 @@ MAX_CONTEXT_CHARS: int = 10_000
 PROMPT_TEMPLATE = """\
 Your task:
 1. Read the question and the retrieved context carefully.
-2. Use ONLY the retrieved information if it sufficiently answers the question.
-3. If the retrieved context is missing or irrelevant, answer based on your reliable external knowledge.
-4. Do NOT introduce unrelated facts or hallucinate.
-5. Answer clearly and concisely in English.
+2. If the retrieved context is missing or irrelevant, answer based on your reliable external knowledge.
+3. Do NOT introduce unrelated facts or hallucinate.
+4. Answer clearly and concisely in English.
 
 Question:
 {question}
@@ -187,14 +186,13 @@ def answer_question(
         if hasattr(tokenizer, "apply_chat_template") and getattr(
             tokenizer, "chat_template", None
         ):
+            # Gemma 2 and some others only support "user" and "model"; fold system into user.
+            user_content = (
+                "You are an expert assistant with access to external retrieved documents.\n\n"
+                + prompt_body
+            )
             text = tokenizer.apply_chat_template(
-                [
-                    {
-                        "role": "system",
-                        "content": "You are an expert assistant with access to external retrieved documents.",
-                    },
-                    {"role": "user", "content": prompt_body},
-                ],
+                [{"role": "user", "content": user_content}],
                 tokenize=False,
                 add_generation_prompt=True,
             )
