@@ -24,9 +24,6 @@ Your task:
 1. Read the question and the retrieved context carefully.
 2. If the retrieved context is missing or irrelevant, answer based on your external knowledge.
 3. Answer clearly and concisely in English.
-1. Read the question and the retrieved context carefully.
-2. If the retrieved context is missing or irrelevant, answer based on your external knowledge.
-3. Answer clearly and concisely in English.
 
 Question:
 {question}
@@ -35,8 +32,43 @@ Retrieved Context:
 {context}
 
 Answer:
-Provide the final answer below in English. Do not show your reasoning steps.
-Provide the final answer below in English. Do not show your reasoning steps.
+Provide the final answer below. Do not show your reasoning steps. Answer in english.
+"""
+
+# Prompt for evaluating a single chunk's relevance and extracting a partial answer.
+CHUNK_RELEVANCE_TEMPLATE = """\
+Your task:
+1. Read the question and the single retrieved chunk carefully.
+2. Decide whether the chunk contains information relevant to answering the question.
+3. If relevant, provide a concise partial answer based solely on this chunk.
+4. If not relevant, respond with exactly: NOT RELEVANT
+
+Question:
+{question}
+
+Retrieved Chunk ({chunk_idx}/{total_chunks}):
+{chunk_text}
+
+Response:
+If this chunk is relevant, provide a partial answer. Otherwise, write "NOT RELEVANT".
+"""
+
+# Prompt for synthesizing a final answer from all per-chunk responses.
+SYNTHESIS_TEMPLATE = """\
+Your task:
+1. Read the question and the partial responses collected from evaluating each retrieved chunk.
+2. Synthesize a single, concise final answer in English based on the relevant responses.
+3. If none of the chunks were relevant, answer based on your external knowledge.
+4. Do not show your reasoning steps.
+
+Question:
+{question}
+
+Per-chunk responses:
+{chunk_responses}
+
+Final Answer:
+Provide the final answer below. Answer in English.
 """
 
 _tokenizer = None
@@ -159,25 +191,15 @@ def _split_thinking(content: str) -> tuple[str, str]:
     return "", content.strip()
 
 
-def answer_question(
-    question: str,
-    context_chunks: list,
+def _generate_from_prompt(
+    prompt_body: str,
+    tokenizer,
+    qa_model,
+    is_encoder_decoder: bool,
     *,
-    model_name: str = _DEFAULT_MODEL,
     max_new_tokens: int = 256,
-    max_context_chars: int = MAX_CONTEXT_CHARS,
 ) -> str:
-    """
-    Generate an answer for *question* given *context_chunks*.
-
-    context_chunks can be list[str] or list[dict] (from structured retrievers).
-    Returns only the final answer string (thinking stripped for reasoning models).
-    """
-    tokenizer, qa_model, is_encoder_decoder = _load(model_name)
-
-    context = _build_context(context_chunks, max_chars=max_context_chars)
-    prompt_body = PROMPT_TEMPLATE.format(question=question.strip(), context=context)
-
+    """Run inference on a single prompt_body string and return the decoded answer."""
     if is_encoder_decoder:
         inputs = tokenizer(
             prompt_body,
@@ -189,7 +211,6 @@ def answer_question(
         if hasattr(tokenizer, "apply_chat_template") and getattr(
             tokenizer, "chat_template", None
         ):
-            # Gemma 2 and some others only support "user" and "model"; fold system into user.
             user_content = (
                 "You are an expert assistant with access to external retrieved documents.\n\n"
                 + prompt_body
@@ -210,12 +231,6 @@ def answer_question(
         ).to(qa_model.device)
 
     num_beams = 4 if is_encoder_decoder else 1
-
-    # Build a fresh GenerationConfig with only what we need.  Passing explicit
-    # neutral values for temperature/top_p/top_k overrides whatever the model's
-    # saved generation_config.json has (e.g. Qwen ships temperature=0.7), which
-    # would otherwise trigger spurious "do_sample=False but temperature is set"
-    # warnings during every generate() call.
     gen_cfg = GenerationConfig(
         max_new_tokens=max_new_tokens,
         do_sample=False,
@@ -227,10 +242,7 @@ def answer_question(
     )
 
     with torch.no_grad():
-        outputs = qa_model.generate(
-            **inputs,
-            generation_config=gen_cfg,
-        )
+        outputs = qa_model.generate(**inputs, generation_config=gen_cfg)
 
     if is_encoder_decoder:
         raw = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
@@ -241,3 +253,96 @@ def answer_question(
 
     _thinking, answer = _split_thinking(raw)
     return answer
+
+
+def answer_question(
+    question: str,
+    context_chunks: list,
+    *,
+    model_name: str = _DEFAULT_MODEL,
+    max_new_tokens: int = 256,
+    max_context_chars: int = MAX_CONTEXT_CHARS,
+) -> str:
+    """
+    Generate an answer for *question* given *context_chunks*.
+
+    context_chunks can be list[str] or list[dict] (from structured retrievers).
+    Returns only the final answer string (thinking stripped for reasoning models).
+    """
+    tokenizer, qa_model, is_encoder_decoder = _load(model_name)
+    context = _build_context(context_chunks, max_chars=max_context_chars)
+    prompt_body = PROMPT_TEMPLATE.format(question=question.strip(), context=context)
+    return _generate_from_prompt(
+        prompt_body,
+        tokenizer,
+        qa_model,
+        is_encoder_decoder,
+        max_new_tokens=max_new_tokens,
+    )
+
+
+def answer_question_iterative(
+    question: str,
+    context_chunks: list,
+    *,
+    model_name: str = _DEFAULT_MODEL,
+    max_new_tokens: int = 256,
+) -> str:
+    """
+    Iterative chunk-by-chunk RAG reader.
+
+    For each retrieved chunk, the LLM is asked independently whether the chunk
+    is relevant to the question.  If relevant, it provides a partial answer;
+    otherwise it responds "NOT RELEVANT".  After all chunks are processed, a
+    final synthesis call consolidates the partial answers into one response.
+
+    context_chunks can be list[str] or list[dict] (from structured retrievers).
+    Returns only the final answer string (thinking stripped for reasoning models).
+    """
+    tokenizer, qa_model, is_encoder_decoder = _load(model_name)
+
+    # Normalise chunks to plain strings, best-first when scores available.
+    chunks = list(context_chunks)
+    if chunks and isinstance(chunks[0], dict) and "score" in chunks[0]:
+        chunks = sorted(chunks, key=lambda x: x.get("score", 0.0), reverse=True)
+
+    chunk_texts: list[str] = []
+    for item in chunks:
+        text = item["text"].strip() if isinstance(item, dict) else str(item).strip()
+        if text:
+            chunk_texts.append(text)
+
+    total = len(chunk_texts)
+    per_chunk_responses: list[str] = []
+
+    for idx, chunk_text in enumerate(chunk_texts, start=1):
+        prompt_body = CHUNK_RELEVANCE_TEMPLATE.format(
+            question=question.strip(),
+            chunk_idx=idx,
+            total_chunks=total,
+            chunk_text=chunk_text,
+        )
+        response = _generate_from_prompt(
+            prompt_body,
+            tokenizer,
+            qa_model,
+            is_encoder_decoder,
+            max_new_tokens=max_new_tokens,
+        )
+        print(f"  [Chunk {idx}/{total}] {response[:120].rstrip()}{'...' if len(response) > 120 else ''}")
+        per_chunk_responses.append(f"Chunk {idx}: {response}")
+
+    # Synthesise a final answer from all per-chunk responses.
+    chunk_responses_text = "\n\n".join(per_chunk_responses)
+    synthesis_prompt = SYNTHESIS_TEMPLATE.format(
+        question=question.strip(),
+        chunk_responses=chunk_responses_text,
+    )
+    final_answer = _generate_from_prompt(
+        synthesis_prompt,
+        tokenizer,
+        qa_model,
+        is_encoder_decoder,
+        max_new_tokens=max_new_tokens,
+    )
+    return final_answer

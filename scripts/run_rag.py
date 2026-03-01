@@ -167,6 +167,15 @@ def main():
         help="Cross-encoder model for re-ranking.",
     )
     ap.add_argument(
+        "--iterative",
+        action="store_true",
+        help=(
+            "Feed chunks to the LLM one by one. "
+            "For each chunk the model decides relevance and optionally gives a partial answer; "
+            "a final synthesis call consolidates all responses."
+        ),
+    )
+    ap.add_argument(
         "--output",
         type=str,
         default=None,
@@ -183,7 +192,7 @@ def main():
             embed_queries,
         )
         from rag_utils.hybrid_retrieval import rrf_single
-        from rag_utils.reader import answer_question
+        from rag_utils.reader import answer_question, answer_question_iterative
         from rag_utils.sparse_retriever import SparseRetriever
 
         if args.rerank:
@@ -256,15 +265,26 @@ def main():
             out = rerank(q, out, top_k=args.top_k, model_name=args.rerank_model)
         return out
 
-    def run_and_print(q: str) -> str:
-        retrieved = retrieve(q)
-        ans = answer_question(
+    def _answer(q: str, retrieved: list) -> str:
+        """Dispatch to iterative or standard reader depending on --iterative flag."""
+        if args.iterative:
+            return answer_question_iterative(
+                q,
+                retrieved,
+                model_name=args.reader_model,
+                max_new_tokens=args.max_new_tokens,
+            )
+        return answer_question(
             q,
             retrieved,
             model_name=args.reader_model,
             max_new_tokens=args.max_new_tokens,
             max_context_chars=args.max_context_chars,
         )
+
+    def run_and_print(q: str) -> str:
+        retrieved = retrieve(q)
+        ans = _answer(q, retrieved)
         print(f"\nAnswer:\n{ans}\n")
         return ans
 
@@ -301,13 +321,7 @@ def main():
                 query_embs_batch[i : i + 1] if query_embs_batch is not None else None
             )
             retrieved = retrieve(question, q_emb=q_emb)
-            ans = answer_question(
-                question,
-                retrieved,
-                model_name=args.reader_model,
-                max_new_tokens=args.max_new_tokens,
-                max_context_chars=args.max_context_chars,
-            )
+            ans = _answer(question, retrieved)
             print(f"\nAnswer:\n{ans}\n")
             results[qid] = ans
 
