@@ -11,8 +11,11 @@ urllib3==2.2.3
 numpy
 rank-bm25
 sentence-transformers
-# >=4.44.2 for FlagEmbedding (BAAI/bge-m3); >=4.42 for Gemma 2 reader
-transformers>=4.44.2
+# 4.45.x is the last release that has DynamicCache.from_legacy_cache (removed in 4.46),
+# tokenization_qwen2_fast at its original module path (reorganised in 5.x), and
+# Qwen2Config.rope_theta as a direct attribute — all required by stella's
+# trust_remote_code files. 4.45 also introduced first-class Qwen2.5 support.
+transformers==4.45.2
 accelerate
 torch>=2.0.0
 sentencepiece
