@@ -94,6 +94,10 @@ def main():
 
         print(f"Chunking docs (strategy={args.chunking}) …")
         chunk_records = []
+        semantic_model = None
+        if args.chunking == "semantic":
+            from sentence_transformers import SentenceTransformer
+            semantic_model = SentenceTransformer(model_name)
         for idx, doc in enumerate(read_jsonl(cfg.parsed_docs_path)):
             doc_id = doc.get("doc_id") or doc.get("id") or f"doc_{idx}"
             text = doc.get("text") or ""
@@ -103,6 +107,8 @@ def main():
             if args.chunking == "semantic":
                 chunks = semantic_chunk_text(
                     text,
+                    model=semantic_model,
+                    embed_model=model_name,
                     buffer_size=args.semantic_buffer,
                     breakpoint_percentile=args.semantic_percentile,
                     max_chunk_tokens=args.chunk_size,

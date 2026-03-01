@@ -84,6 +84,24 @@ def embed_query(query: str, *, model_name: str = _DEFAULT_MODEL_NAME) -> np.ndar
     return emb.astype(np.float32)
 
 
+def embed_queries(
+    queries: list[str],
+    *,
+    model_name: str = _DEFAULT_MODEL_NAME,
+    batch_size: int = 32,
+) -> np.ndarray:
+    """Encode multiple queries -> (N, dim) float32 array. More efficient than repeated embed_query."""
+    if not queries:
+        raise ValueError("embed_queries received an empty list.")
+    model = get_dense_model(model_name)
+    all_embs: list[np.ndarray] = []
+    for i in range(0, len(queries), batch_size):
+        batch = queries[i : i + batch_size]
+        emb = _encode_batch_st(model, batch, normalize=True)
+        all_embs.append(emb)
+    return np.vstack(all_embs).astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 # FAISS index
 # ---------------------------------------------------------------------------

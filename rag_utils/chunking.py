@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import Any, List, Optional
 
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
@@ -36,6 +36,7 @@ def semantic_chunk_text(
     text: str,
     *,
     embed_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+    model: Optional[Any] = None,
     buffer_size: int = 1,
     breakpoint_percentile: int = 95,
     max_chunk_tokens: int = 500,
@@ -55,7 +56,11 @@ def semantic_chunk_text(
     Parameters
     ----------
     embed_model:
-        Sentence-transformers model name used to embed the context windows.
+        Sentence-transformers model name used to embed the context windows
+        (ignored if ``model`` is provided).
+    model:
+        Optional pre-loaded SentenceTransformer (or compatible) model.
+        When provided, avoids loading a new model per document (faster for batch chunking).
     buffer_size:
         Number of neighbouring sentences on each side included in the
         context window for computing the similarity between boundaries.
@@ -80,7 +85,8 @@ def semantic_chunk_text(
         hi = min(len(sentences), i + buffer_size + 1)
         combined.append(" ".join(sentences[lo:hi]))
 
-    model = SentenceTransformer(embed_model)
+    if model is None:
+        model = SentenceTransformer(embed_model)
     embs = model.encode(combined, show_progress_bar=False, convert_to_numpy=True,
                         normalize_embeddings=True)
 

@@ -13,7 +13,7 @@ from transformers import (
     GenerationConfig,
 )
 
-_DEFAULT_MODEL = "google/gemma-2-12b-it"
+_DEFAULT_MODEL = "Qwen/Qwen2.5-14B-Instruct"
 
 # Character-based context budget (mirrors reference repo's MAX_CONTEXT_CHARS).
 MAX_CONTEXT_CHARS: int = 10_000
@@ -119,11 +119,17 @@ def _build_context(
     """
     Assemble context from retrieved results.
     Accepts either list[str] or list[dict] (structured results from retrievers).
+    Sorts by relevance score descending when available so the best chunk is first.
     Respects max_chars budget.
     """
+    # Sort by score descending so most relevant chunks come first when truncating
+    chunks = list(retrieved_chunks)
+    if chunks and isinstance(chunks[0], dict) and "score" in chunks[0]:
+        chunks = sorted(chunks, key=lambda x: x.get("score", 0.0), reverse=True)
+
     ctxs: list[str] = []
     total_len = 0
-    for item in retrieved_chunks:
+    for item in chunks:
         text = item["text"].strip() if isinstance(item, dict) else str(item).strip()
         if not text:
             continue
@@ -216,7 +222,7 @@ def answer_question(
         repetition_penalty=1.2,
         no_repeat_ngram_size=3,
         temperature=1.0,
-        top_p=1.0
+        top_p=1.0,
     )
 
     with torch.no_grad():

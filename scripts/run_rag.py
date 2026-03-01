@@ -135,7 +135,7 @@ def main():
     ap.add_argument(
         "--reader-model",
         type=str,
-        default="google/gemma-2-12b-it",
+        default="Qwen/Qwen2.5-14B-Instruct",
         help="HF model name for the reader.",
     )
     ap.add_argument("--max-new-tokens", type=int, default=256)
@@ -144,6 +144,23 @@ def main():
         type=int,
         default=10_000,
         help="Max characters of retrieved context passed to reader.",
+    )
+    ap.add_argument(
+        "--rerank",
+        action="store_true",
+        help="Use cross-encoder to re-rank candidates before passing to reader.",
+    )
+    ap.add_argument(
+        "--rerank-top-k",
+        type=int,
+        default=20,
+        help="Number of candidates to pass to reranker (only when --rerank).",
+    )
+    ap.add_argument(
+        "--rerank-model",
+        type=str,
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        help="Cross-encoder model for re-ranking.",
     )
     ap.add_argument(
         "--output",
@@ -155,10 +172,17 @@ def main():
 
     try:
         import numpy as np
-        from rag_utils.dense_retriever import build_faiss_index, dense_search, embed_query
+        from rag_utils.dense_retriever import (
+            build_faiss_index,
+            dense_search,
+            embed_query,
+            embed_queries,
+        )
         from rag_utils.hybrid_retrieval import rrf_single
         from rag_utils.reader import answer_question
         from rag_utils.sparse_retriever import SparseRetriever
+        if args.rerank:
+            from rag_utils.reranker import rerank
     except Exception as e:
         raise SystemExit(
             f"Failed to import RAG ML dependencies.\nImport error: {repr(e)}\n"
@@ -179,22 +203,35 @@ def main():
         id_arr = np.array(chunk_ids)
         faiss_index = build_faiss_index(embeddings)
 
-    print(f"\nMode={args.mode} | Embed={args.embed} | Chunking={args.chunking} | top_k={args.top_k}\n")
+    rerank_k = args.rerank_top_k if args.rerank else args.top_k
+    retrieve_top_k = args.rerank_top_k if args.rerank else args.top_k
+    if args.mode in ("dense", "rrf"):
+        candidate_k = max(args.candidate_k, retrieve_top_k) if args.mode == "rrf" else retrieve_top_k
+    else:
+        candidate_k = retrieve_top_k
 
-    def retrieve(q: str) -> list[dict]:
-        """Run the selected retrieval mode for a single query."""
+    print(
+        f"\nMode={args.mode} | Embed={args.embed} | Chunking={args.chunking} | top_k={args.top_k}"
+        + (f" | rerank={args.rerank} (rerank_top_k={args.rerank_top_k})" if args.rerank else "")
+        + "\n"
+    )
+
+    def retrieve(q: str, q_emb: np.ndarray | None = None) -> list[dict]:
+        """Run the selected retrieval mode for a single query. q_emb can be precomputed (1, dim)."""
         if args.mode == "sparse":
-            return sparse.search(q, top_k=args.top_k)
+            out = sparse.search(q, top_k=retrieve_top_k)
+        else:
+            emb = q_emb if q_emb is not None else embed_query(q, model_name=_EMBED_MODEL_MAP[args.embed])
+            if args.mode == "dense":
+                out = dense_search(faiss_index, emb, id_arr, texts, top_k=retrieve_top_k)[0]
+            else:
+                dense_res = dense_search(faiss_index, emb, id_arr, texts, top_k=candidate_k)[0]
+                sparse_res = sparse.search(q, top_k=candidate_k)
+                out = rrf_single(dense_res, sparse_res, top_k=retrieve_top_k, k=args.rrf_k)
 
-        q_emb = embed_query(q, model_name=_EMBED_MODEL_MAP[args.embed])
-
-        if args.mode == "dense":
-            return dense_search(faiss_index, q_emb, id_arr, texts, top_k=args.top_k)[0]
-
-        # rrf – need both retrievers
-        dense_res = dense_search(faiss_index, q_emb, id_arr, texts, top_k=args.candidate_k)[0]
-        sparse_res = sparse.search(q, top_k=args.candidate_k)
-        return rrf_single(dense_res, sparse_res, top_k=args.top_k, k=args.rrf_k)
+        if args.rerank and out:
+            out = rerank(q, out, top_k=args.top_k, model_name=args.rerank_model)
+        return out
 
     def run_and_print(q: str) -> str:
         retrieved = retrieve(q)
@@ -222,23 +259,46 @@ def main():
         with open(args.queries_file, "r", encoding="utf-8") as f:
             queries = json.load(f)
 
+        items = [
+            x for x in queries
+            if x.get("question") or x.get("query")
+        ]
+        questions = [
+            (x.get("question") or x.get("query", "")).strip()
+            for x in items
+        ]
+        query_embs_batch = None
+        if items and args.mode in ("dense", "rrf"):
+            print("Batch embedding queries…")
+            query_embs_batch = embed_queries(
+                questions,
+                model_name=_EMBED_MODEL_MAP[args.embed],
+            )
+
         results: dict[str, str] = {}
-        for item in queries:
+        for i, item in enumerate(items):
             qid = str(item.get("id", item.get("qid", "")))
-            question = item.get("question", item.get("query", ""))
-            if not question:
-                continue
+            question = questions[i]
             print(f"[{qid}] {question}")
-            ans = run_and_print(question)
+            q_emb = query_embs_batch[i : i + 1] if query_embs_batch is not None else None
+            retrieved = retrieve(question, q_emb=q_emb)
+            ans = answer_question(
+                question,
+                retrieved,
+                model_name=args.reader_model,
+                max_new_tokens=args.max_new_tokens,
+                max_context_chars=args.max_context_chars,
+            )
+            print(f"\nAnswer:\n{ans}\n")
             results[qid] = ans
 
         output_path = args.output
         if not output_path:
             ensure_dir("system_outputs")
-            output_path = (
-                f"system_outputs/system_output_{args.embed}_{args.mode}"
-                f"_{args.chunking}_{args.top_k}.json"
-            )
+            suffix = f"_{args.embed}_{args.mode}_{args.chunking}_{args.top_k}"
+            if args.rerank:
+                suffix += "_rerank"
+            output_path = f"system_outputs/system_output{suffix}.json"
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
         print(f"\nSaved {len(results)} answers to {output_path}")
