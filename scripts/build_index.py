@@ -87,6 +87,8 @@ def main():
 
     ensure_dir(cfg.rag_dir)
 
+    cleaned_dir = Path(cfg.parsed_dir) / "cleaned"
+
     # ------------------------------------------------------------------
     # 1. Build / load chunks
     # ------------------------------------------------------------------
@@ -94,23 +96,24 @@ def main():
         print(f"Loading existing chunks from {chunks_path} …")
         chunk_records = list(read_jsonl(chunks_path))
     else:
-        if not os.path.exists(cfg.parsed_docs_path):
+        txt_files = sorted(cleaned_dir.glob("*.txt"))
+        if not txt_files:
             raise FileNotFoundError(
-                f"Parsed docs not found at {cfg.parsed_docs_path}. "
-                "Run `python3 scripts/run_pipeline.py` first."
+                f"No .txt files found in {cleaned_dir}. "
+                "Populate data/parsed/cleaned/ first."
             )
         if os.path.exists(chunks_path):
             os.remove(chunks_path)
 
-        print(f"Chunking docs (strategy={args.chunking}) …")
+        print(f"Chunking {len(txt_files)} docs from {cleaned_dir} (strategy={args.chunking}) …")
         chunk_records = []
         semantic_model = None
         if args.chunking == "semantic":
             from sentence_transformers import SentenceTransformer
             semantic_model = SentenceTransformer(model_name)
-        for idx, doc in enumerate(read_jsonl(cfg.parsed_docs_path)):
-            doc_id = doc.get("doc_id") or doc.get("id") or f"doc_{idx}"
-            text = doc.get("text") or ""
+        for txt_file in txt_files:
+            doc_id = txt_file.stem
+            text = txt_file.read_text(encoding="utf-8")
             if not text.strip():
                 continue
 
