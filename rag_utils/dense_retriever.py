@@ -25,10 +25,38 @@ _loaded_model_name: Optional[str] = None
 # ---------------------------------------------------------------------------
 
 
+def _patch_qwen2_rope_theta() -> None:
+    """Ensure Qwen2Config instances always expose `rope_theta` as a direct attribute.
+
+    Newer transformers versions (≥4.47) moved rope_theta into the rope_scaling dict,
+    so instances no longer have it as a standalone attribute. Stella's custom
+    modeling_qwen.py (loaded via trust_remote_code) still accesses config.rope_theta
+    directly, causing an AttributeError. This one-time monkey-patch restores it.
+    """
+    try:
+        from transformers import Qwen2Config
+
+        if hasattr(Qwen2Config(), "rope_theta"):
+            return  # already present; nothing to do
+
+        _orig_init = Qwen2Config.__init__
+
+        def _patched_init(self, *args, rope_theta: float = 1_000_000.0, **kwargs):
+            _orig_init(self, *args, **kwargs)
+            if not hasattr(self, "rope_theta"):
+                self.rope_theta = rope_theta
+
+        Qwen2Config.__init__ = _patched_init  # type: ignore[method-assign]
+    except Exception:
+        pass  # non-fatal; let the real load attempt surface any remaining error
+
+
 def _load_sentence_transformer(model_name: str):
     from sentence_transformers import SentenceTransformer
 
     trust_remote_code = model_name in _TRUST_REMOTE_CODE_MODELS
+    if trust_remote_code:
+        _patch_qwen2_rope_theta()
     return SentenceTransformer(model_name, trust_remote_code=trust_remote_code)
 
 
