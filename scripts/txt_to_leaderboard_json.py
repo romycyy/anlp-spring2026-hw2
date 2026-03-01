@@ -8,8 +8,8 @@ from pathlib import Path
 
 def main():
     repo = Path(__file__).resolve().parent.parent
-    txt_path = repo / "test_set_day_3.txt"
-    out_path = repo / "test_set_day_3_queries.json"
+    txt_path = repo / "test_set_day_4.txt"
+    out_path = repo / "test_set_day_4_queries.json"
 
     queries = []
     with open(txt_path, encoding="utf-8") as f:
