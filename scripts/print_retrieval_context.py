@@ -252,11 +252,7 @@ def main():
             qid = str(item.get("id", item.get("qid", i)))
             q = questions[i]
             q_emb = query_embs[i : i + 1] if query_embs is not None else None
-            # Temporarily override retrieve to use precomputed emb for this query
-            if q_emb is not None:
-                retrieved = retrieve(q, q_emb=q_emb)
-            else:
-                retrieved = retrieve(q)
+            retrieved = retrieve(q, q_emb=q_emb)
             context = _build_context(retrieved, max_chars=args.max_context_chars)
             results[qid] = {"question": q, "context": context, "num_chunks": len(retrieved)}
             print(f"\n[{qid}] {q}")
