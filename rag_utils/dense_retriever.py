@@ -25,30 +25,52 @@ _loaded_model_name: Optional[str] = None
 # ---------------------------------------------------------------------------
 
 
-def _patch_qwen2_rope_theta() -> None:
-    """Ensure Qwen2Config instances always expose `rope_theta` as a direct attribute.
+def _patch_stella_transformers_compat() -> None:
+    """Apply compatibility shims for stella (NovaSearch/stella_en_1.5B_v5) when
+    running against transformers ≥ 4.47 / 5.x.
 
-    Newer transformers versions (≥4.47) moved rope_theta into the rope_scaling dict,
-    so instances no longer have it as a standalone attribute. Stella's custom
-    modeling_qwen.py (loaded via trust_remote_code) still accesses config.rope_theta
-    directly, causing an AttributeError. This one-time monkey-patch restores it.
+    Two known breakages in stella's trust_remote_code files:
+
+    1. tokenization_qwen.py imports from the internal submodule
+       `transformers.models.qwen2.tokenization_qwen2_fast` which was removed in
+       transformers 5.x. The class still exists at the top-level
+       `transformers.Qwen2TokenizerFast`, so we inject a shim module under the
+       old path into sys.modules before the cached file is executed.
+
+    2. modeling_qwen.py accesses `config.rope_theta` directly on Qwen2Config
+       instances, but newer transformers moved it into the rope_scaling dict so
+       the attribute no longer exists on the object. We patch Qwen2Config.__init__
+       to restore it.
     """
+    import sys
+    import types
+
+    # --- shim 1: tokenization_qwen2_fast submodule ---
+    _OLD_TOK_PATH = "transformers.models.qwen2.tokenization_qwen2_fast"
+    if _OLD_TOK_PATH not in sys.modules:
+        try:
+            from transformers import Qwen2TokenizerFast  # still exported at top level
+            shim = types.ModuleType(_OLD_TOK_PATH)
+            shim.Qwen2TokenizerFast = Qwen2TokenizerFast  # type: ignore[attr-defined]
+            sys.modules[_OLD_TOK_PATH] = shim
+        except Exception:
+            pass
+
+    # --- shim 2: Qwen2Config.rope_theta ---
     try:
         from transformers import Qwen2Config
 
-        if hasattr(Qwen2Config(), "rope_theta"):
-            return  # already present; nothing to do
+        if not hasattr(Qwen2Config(), "rope_theta"):
+            _orig_init = Qwen2Config.__init__
 
-        _orig_init = Qwen2Config.__init__
+            def _patched_init(self, *args, rope_theta: float = 1_000_000.0, **kwargs):
+                _orig_init(self, *args, **kwargs)
+                if not hasattr(self, "rope_theta"):
+                    self.rope_theta = rope_theta
 
-        def _patched_init(self, *args, rope_theta: float = 1_000_000.0, **kwargs):
-            _orig_init(self, *args, **kwargs)
-            if not hasattr(self, "rope_theta"):
-                self.rope_theta = rope_theta
-
-        Qwen2Config.__init__ = _patched_init  # type: ignore[method-assign]
+            Qwen2Config.__init__ = _patched_init  # type: ignore[method-assign]
     except Exception:
-        pass  # non-fatal; let the real load attempt surface any remaining error
+        pass
 
 
 def _load_sentence_transformer(model_name: str):
@@ -56,7 +78,7 @@ def _load_sentence_transformer(model_name: str):
 
     trust_remote_code = model_name in _TRUST_REMOTE_CODE_MODELS
     if trust_remote_code:
-        _patch_qwen2_rope_theta()
+        _patch_stella_transformers_compat()
     return SentenceTransformer(model_name, trust_remote_code=trust_remote_code)
 
 
