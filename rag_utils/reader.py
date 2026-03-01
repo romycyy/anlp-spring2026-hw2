@@ -13,7 +13,7 @@ from transformers import (
     GenerationConfig,
 )
 
-_DEFAULT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+_DEFAULT_MODEL = "google/gemma-2-12b-it"
 
 # Character-based context budget (mirrors reference repo's MAX_CONTEXT_CHARS).
 MAX_CONTEXT_CHARS: int = 10_000

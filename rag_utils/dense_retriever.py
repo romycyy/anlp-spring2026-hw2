@@ -1,4 +1,5 @@
 """Dense retrieval: sentence-transformers or BAAI/bge-m3 with a FAISS index."""
+
 from __future__ import annotations
 
 from typing import Optional
@@ -16,23 +17,20 @@ _loaded_model_name: Optional[str] = None
 # Model loading helpers
 # ---------------------------------------------------------------------------
 
+
 def _load_sentence_transformer(model_name: str):
     from sentence_transformers import SentenceTransformer
+
     return SentenceTransformer(model_name)
 
 
-def _load_baai(model_name: str = _BAAI_MODEL_NAME):
-    from FlagEmbedding import BGEM3FlagModel  # type: ignore[import]  # pip install FlagEmbedding
-    return BGEM3FlagModel(model_name, use_fp16=True)
-
-
 def get_dense_model(model_name: str = _DEFAULT_MODEL_NAME):
+    """Load dense model. BAAI/bge-m3 is loaded via SentenceTransformer to avoid
+    FlagEmbedding's BiTrainer import, which is incompatible with newer transformers.
+    """
     global _dense_model, _loaded_model_name
     if _dense_model is None or _loaded_model_name != model_name:
-        if model_name == _BAAI_MODEL_NAME:
-            _dense_model = _load_baai(model_name)
-        else:
-            _dense_model = _load_sentence_transformer(model_name)
+        _dense_model = _load_sentence_transformer(model_name)
         _loaded_model_name = model_name
     return _dense_model
 
@@ -41,19 +39,17 @@ def get_dense_model(model_name: str = _DEFAULT_MODEL_NAME):
 # Embedding helpers
 # ---------------------------------------------------------------------------
 
+
 def _encode_batch_st(model, texts: list[str], normalize: bool = True) -> np.ndarray:
     return np.asarray(
-        model.encode(texts, show_progress_bar=False, convert_to_numpy=True,
-                     normalize_embeddings=normalize),
+        model.encode(
+            texts,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=normalize,
+        ),
         dtype=np.float32,
     )
-
-
-def _encode_batch_baai(model, texts: list[str]) -> np.ndarray:
-    import faiss  # type: ignore[import]
-    emb = model.encode(texts, batch_size=64)["dense_vecs"].astype("float32")
-    faiss.normalize_L2(emb)
-    return emb
 
 
 def embed_texts(
@@ -72,13 +68,11 @@ def embed_texts(
     rng = range(0, len(texts), batch_size)
     if show_progress_bar:
         from tqdm import tqdm as _tqdm
+
         rng = _tqdm(rng, desc="Embedding chunks")
     for i in rng:
-        batch = texts[i: i + batch_size]
-        if model_name == _BAAI_MODEL_NAME:
-            emb = _encode_batch_baai(model, batch)
-        else:
-            emb = _encode_batch_st(model, batch, normalize=normalize)
+        batch = texts[i : i + batch_size]
+        emb = _encode_batch_st(model, batch, normalize=normalize)
         all_embs.append(emb)
     return np.vstack(all_embs).astype("float32")
 
@@ -86,10 +80,7 @@ def embed_texts(
 def embed_query(query: str, *, model_name: str = _DEFAULT_MODEL_NAME) -> np.ndarray:
     """Encode a single query -> (1, dim) float32 array."""
     model = get_dense_model(model_name)
-    if model_name == _BAAI_MODEL_NAME:
-        emb = _encode_batch_baai(model, [query])
-    else:
-        emb = _encode_batch_st(model, [query], normalize=True)
+    emb = _encode_batch_st(model, [query], normalize=True)
     return emb.astype(np.float32)
 
 
@@ -97,9 +88,11 @@ def embed_query(query: str, *, model_name: str = _DEFAULT_MODEL_NAME) -> np.ndar
 # FAISS index
 # ---------------------------------------------------------------------------
 
+
 def build_faiss_index(embeddings: np.ndarray):
     """Build an L2-normalised FAISS flat inner-product index."""
     import faiss  # type: ignore[import]
+
     emb = np.asarray(embeddings, dtype=np.float32)
     if emb.ndim == 1:
         emb = emb[None, :]
@@ -121,6 +114,7 @@ def dense_search(
     Returns list[list[dict]] with keys: rank, chunk_id, score, text.
     """
     import faiss  # type: ignore[import]
+
     q = np.asarray(query_embeddings, dtype=np.float32)
     if q.ndim == 1:
         q = q[None, :]
@@ -134,11 +128,13 @@ def dense_search(
             if i < 0:
                 continue
             idx = int(i)
-            one_query.append({
-                "rank": rank,
-                "chunk_id": str(id_list[idx]),
-                "score": float(score),
-                "text": texts[idx],
-            })
+            one_query.append(
+                {
+                    "rank": rank,
+                    "chunk_id": str(id_list[idx]),
+                    "score": float(score),
+                    "text": texts[idx],
+                }
+            )
         results.append(one_query)
     return results
