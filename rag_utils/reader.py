@@ -106,6 +106,19 @@ Final Answer:
 Photosynthesis is the process by which plants use sunlight and chlorophyll to convert carbon dioxide and water into glucose and oxygen.
 --- End Example ---
 
+--- Example ---
+Question:
+Who invented the telephone?
+
+Per-chunk responses:
+Chunk 1: NOT RELEVANT
+Chunk 2: NOT RELEVANT
+Chunk 3: NOT RELEVANT
+
+Final Answer:
+Alexander Graham Bell invented the telephone, receiving the first patent on March 7, 1876.
+--- End Example ---
+
 Question:
 {question}
 
@@ -340,7 +353,9 @@ def answer_question_iterative(
     Returns only the final answer string (thinking stripped for reasoning models).
     """
     chunk_tok, chunk_model, chunk_is_enc_dec = _load(chunk_model_name)
-    print(f"  [Iterative] Using '{chunk_model_name}' for chunk relevance, '{model_name}' for synthesis.")
+    print(
+        f"  [Iterative] Using '{chunk_model_name}' for chunk relevance, '{model_name}' for synthesis."
+    )
 
     # Normalise chunks to plain strings, best-first when scores available.
     chunks = list(context_chunks)
@@ -370,7 +385,9 @@ def answer_question_iterative(
             chunk_is_enc_dec,
             max_new_tokens=max_new_tokens,
         )
-        print(f"  [Chunk {idx}/{total}] {response[:120].rstrip()}{'...' if len(response) > 120 else ''}")
+        print(
+            f"  [Chunk {idx}/{total}] {response[:120].rstrip()}{'...' if len(response) > 120 else ''}"
+        )
         per_chunk_responses.append(f"Chunk {idx}: {response}")
 
     # Synthesise a final answer using the main (larger) model.
