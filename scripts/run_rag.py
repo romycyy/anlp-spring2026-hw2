@@ -176,6 +176,15 @@ def main():
         ),
     )
     ap.add_argument(
+        "--chunk-model",
+        type=str,
+        default="Qwen/Qwen2.5-1.5B-Instruct",
+        help=(
+            "Smaller HF model used for per-chunk relevance classification when --iterative is set. "
+            "Defaults to Qwen/Qwen2.5-1.5B-Instruct for faster inference."
+        ),
+    )
+    ap.add_argument(
         "--output",
         type=str,
         default=None,
@@ -272,6 +281,7 @@ def main():
                 q,
                 retrieved,
                 model_name=args.reader_model,
+                chunk_model_name=args.chunk_model,
                 max_new_tokens=args.max_new_tokens,
             )
         return answer_question(

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 from transformers import (
     AutoConfig,
@@ -14,6 +12,7 @@ from transformers import (
 )
 
 _DEFAULT_MODEL = "Qwen/Qwen2.5-14B-Instruct"
+_DEFAULT_CHUNK_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 # Character-based context budget (mirrors reference repo's MAX_CONTEXT_CHARS).
 MAX_CONTEXT_CHARS: int = 10_000
@@ -24,6 +23,17 @@ Your task:
 1. Read the question and the retrieved context carefully.
 2. If the retrieved context is missing or irrelevant, answer based on your external knowledge.
 3. Answer clearly and concisely in English.
+
+--- Example ---
+Question:
+Who wrote the play Romeo and Juliet?
+
+Retrieved Context:
+Romeo and Juliet is a tragedy written by William Shakespeare, believed to have been written between 1594 and 1596. 
+
+Answer:
+William Shakespeare wrote Romeo and Juliet.
+--- End Example ---
 
 Question:
 {question}
@@ -43,6 +53,28 @@ Your task:
 3. If relevant, provide a concise partial answer based solely on this chunk.
 4. If not relevant, respond with exactly: NOT RELEVANT
 
+--- Example 1 (relevant chunk) ---
+Question:
+Who invented the telephone?
+
+Retrieved Chunk (1/3):
+Alexander Graham Bell is widely credited with inventing the telephone. He was awarded the first patent for the telephone by the United States Patent Office on March 7, 1876.
+
+Response:
+Alexander Graham Bell invented the telephone, receiving the first patent on March 7, 1876.
+--- End Example 1 ---
+
+--- Example 2 (irrelevant chunk) ---
+Question:
+Who invented the telephone?
+
+Retrieved Chunk (2/3):
+The global smartphone market reached approximately $500 billion in revenue in 2023, driven by flagship models from Apple and Samsung.
+
+Response:
+NOT RELEVANT
+--- End Example 2 ---
+
 Question:
 {question}
 
@@ -50,7 +82,7 @@ Retrieved Chunk ({chunk_idx}/{total_chunks}):
 {chunk_text}
 
 Response:
-If this chunk is relevant, provide a partial answer. Otherwise, write "NOT RELEVANT".
+If this chunk is relevant, provide a partial answer. Otherwise, write "NOT RELEVANT". Answer in english. Be concise and clear.
 """
 
 # Prompt for synthesizing a final answer from all per-chunk responses.
@@ -60,6 +92,19 @@ Your task:
 2. Synthesize a single, concise final answer in English based on the relevant responses.
 3. If none of the chunks were relevant, answer based on your external knowledge.
 4. Do not show your reasoning steps.
+
+--- Example ---
+Question:
+What is photosynthesis?
+
+Per-chunk responses:
+Chunk 1: Photosynthesis is the process by which plants use sunlight to convert carbon dioxide and water into glucose and oxygen.
+Chunk 2: NOT RELEVANT
+Chunk 3: The chlorophyll pigment in plant cells captures sunlight energy that drives the photosynthesis reactions.
+
+Final Answer:
+Photosynthesis is the process by which plants use sunlight and chlorophyll to convert carbon dioxide and water into glucose and oxygen.
+--- End Example ---
 
 Question:
 {question}
@@ -71,10 +116,8 @@ Final Answer:
 Provide the final answer below. Answer in English.
 """
 
-_tokenizer = None
-_qa_model = None
-_loaded_model_name: Optional[str] = None
-_loaded_is_encoder_decoder: Optional[bool] = None
+# Model cache: model_name -> (tokenizer, model, is_encoder_decoder)
+_model_cache: dict[str, tuple] = {}
 
 
 def _get_device() -> torch.device:
@@ -106,14 +149,9 @@ def _safe_tokenizer_max_length(tokenizer, *, fallback: int = 512) -> int:
 
 
 def _load(model_name: str = _DEFAULT_MODEL):
-    global _tokenizer, _qa_model, _loaded_model_name, _loaded_is_encoder_decoder
-    if (
-        _qa_model is not None
-        and _tokenizer is not None
-        and _loaded_model_name == model_name
-        and _loaded_is_encoder_decoder is not None
-    ):
-        return _tokenizer, _qa_model, _loaded_is_encoder_decoder
+    global _model_cache
+    if model_name in _model_cache:
+        return _model_cache[model_name]
 
     cfg = AutoConfig.from_pretrained(model_name)
     is_encoder_decoder = bool(getattr(cfg, "is_encoder_decoder", False))
@@ -140,10 +178,7 @@ def _load(model_name: str = _DEFAULT_MODEL):
         model.to(device)
     model.eval()
 
-    _tokenizer = tokenizer
-    _qa_model = model
-    _loaded_model_name = model_name
-    _loaded_is_encoder_decoder = is_encoder_decoder
+    _model_cache[model_name] = (tokenizer, model, is_encoder_decoder)
     return tokenizer, model, is_encoder_decoder
 
 
@@ -286,20 +321,26 @@ def answer_question_iterative(
     context_chunks: list,
     *,
     model_name: str = _DEFAULT_MODEL,
+    chunk_model_name: str = _DEFAULT_CHUNK_MODEL,
     max_new_tokens: int = 256,
 ) -> str:
     """
     Iterative chunk-by-chunk RAG reader.
 
-    For each retrieved chunk, the LLM is asked independently whether the chunk
-    is relevant to the question.  If relevant, it provides a partial answer;
-    otherwise it responds "NOT RELEVANT".  After all chunks are processed, a
-    final synthesis call consolidates the partial answers into one response.
+    Per-chunk relevance classification is handled by *chunk_model_name* (defaults
+    to a small 1.5B model for speed).  The final synthesis call uses the larger
+    *model_name*.  Both models are cached so they stay in memory simultaneously.
+
+    For each retrieved chunk, the small LLM decides whether the chunk is relevant
+    to the question.  If relevant, it provides a partial answer; otherwise it
+    responds "NOT RELEVANT".  After all chunks are processed, the main model
+    consolidates the partial answers into one final response.
 
     context_chunks can be list[str] or list[dict] (from structured retrievers).
     Returns only the final answer string (thinking stripped for reasoning models).
     """
-    tokenizer, qa_model, is_encoder_decoder = _load(model_name)
+    chunk_tok, chunk_model, chunk_is_enc_dec = _load(chunk_model_name)
+    print(f"  [Iterative] Using '{chunk_model_name}' for chunk relevance, '{model_name}' for synthesis.")
 
     # Normalise chunks to plain strings, best-first when scores available.
     chunks = list(context_chunks)
@@ -324,15 +365,16 @@ def answer_question_iterative(
         )
         response = _generate_from_prompt(
             prompt_body,
-            tokenizer,
-            qa_model,
-            is_encoder_decoder,
+            chunk_tok,
+            chunk_model,
+            chunk_is_enc_dec,
             max_new_tokens=max_new_tokens,
         )
         print(f"  [Chunk {idx}/{total}] {response[:120].rstrip()}{'...' if len(response) > 120 else ''}")
         per_chunk_responses.append(f"Chunk {idx}: {response}")
 
-    # Synthesise a final answer from all per-chunk responses.
+    # Synthesise a final answer using the main (larger) model.
+    tokenizer, qa_model, is_encoder_decoder = _load(model_name)
     chunk_responses_text = "\n\n".join(per_chunk_responses)
     synthesis_prompt = SYNTHESIS_TEMPLATE.format(
         question=question.strip(),
