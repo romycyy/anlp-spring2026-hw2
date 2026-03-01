@@ -13,9 +13,7 @@ from transformers import (
     GenerationConfig,
 )
 
-# Gated on Hugging Face: accept license at the model page and run `huggingface-cli login`.
-# On Colab with T4 (15GB), use load_in_4bit=True so the 12B model fits.
-_DEFAULT_MODEL = "google/gemma-3-12b-it"
+_DEFAULT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 # Character-based context budget (mirrors reference repo's MAX_CONTEXT_CHARS).
 MAX_CONTEXT_CHARS: int = 10_000
@@ -43,7 +41,6 @@ _tokenizer = None
 _qa_model = None
 _loaded_model_name: Optional[str] = None
 _loaded_is_encoder_decoder: Optional[bool] = None
-_loaded_load_in_4bit: Optional[bool] = None
 
 
 def _get_device() -> torch.device:
@@ -74,14 +71,13 @@ def _safe_tokenizer_max_length(tokenizer, *, fallback: int = 512) -> int:
     return max_len_int
 
 
-def _load(model_name: str = _DEFAULT_MODEL, *, load_in_4bit: bool = False):
-    global _tokenizer, _qa_model, _loaded_model_name, _loaded_is_encoder_decoder, _loaded_load_in_4bit
+def _load(model_name: str = _DEFAULT_MODEL):
+    global _tokenizer, _qa_model, _loaded_model_name, _loaded_is_encoder_decoder
     if (
         _qa_model is not None
         and _tokenizer is not None
         and _loaded_model_name == model_name
         and _loaded_is_encoder_decoder is not None
-        and _loaded_load_in_4bit == load_in_4bit
     ):
         return _tokenizer, _qa_model, _loaded_is_encoder_decoder
 
@@ -101,20 +97,6 @@ def _load(model_name: str = _DEFAULT_MODEL, *, load_in_4bit: bool = False):
         kwargs = {"torch_dtype": dtype}
         if use_device_map:
             kwargs["device_map"] = "auto"
-        if load_in_4bit and use_device_map:
-            try:
-                from transformers import BitsAndBytesConfig
-                kwargs["quantization_config"] = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=dtype,
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_quant_type="nf4",
-                )
-                kwargs.pop("torch_dtype", None)  # quantization sets its own dtype
-            except ImportError:
-                raise ImportError(
-                    "load_in_4bit=True requires bitsandbytes. Install with: pip install bitsandbytes"
-                ) from None
         model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
         if getattr(tokenizer, "pad_token_id", None) is None:
             if getattr(tokenizer, "eos_token", None) is not None:
@@ -128,7 +110,6 @@ def _load(model_name: str = _DEFAULT_MODEL, *, load_in_4bit: bool = False):
     _qa_model = model
     _loaded_model_name = model_name
     _loaded_is_encoder_decoder = is_encoder_decoder
-    _loaded_load_in_4bit = load_in_4bit
     return tokenizer, model, is_encoder_decoder
 
 
@@ -175,7 +156,6 @@ def answer_question(
     context_chunks: list,
     *,
     model_name: str = _DEFAULT_MODEL,
-    load_in_4bit: bool = False,
     max_new_tokens: int = 256,
     max_context_chars: int = MAX_CONTEXT_CHARS,
 ) -> str:
@@ -184,9 +164,8 @@ def answer_question(
 
     context_chunks can be list[str] or list[dict] (from structured retrievers).
     Returns only the final answer string (thinking stripped for reasoning models).
-    Use load_in_4bit=True on Colab (T4) or other limited VRAM to fit 12B+ models.
     """
-    tokenizer, qa_model, is_encoder_decoder = _load(model_name, load_in_4bit=load_in_4bit)
+    tokenizer, qa_model, is_encoder_decoder = _load(model_name)
 
     context = _build_context(context_chunks, max_chars=max_context_chars)
     prompt_body = PROMPT_TEMPLATE.format(question=question.strip(), context=context)
@@ -237,7 +216,7 @@ def answer_question(
         repetition_penalty=1.2,
         no_repeat_ngram_size=3,
         temperature=1.0,
-        top_p=1.0,
+        top_p=1.0
     )
 
     with torch.no_grad():

@@ -46,9 +46,7 @@ def _resolve_paths(cfg: CrawlConfig, embed_key: str, chunking: str) -> tuple[str
     return chunks_path, emb_path
 
 
-def _load_chunks(
-    cfg: CrawlConfig, chunking: str = "fixed"
-) -> tuple[list[str], list[str]]:
+def _load_chunks(cfg: CrawlConfig, chunking: str = "fixed") -> tuple[list[str], list[str]]:
     """Return (texts, chunk_ids) loaded from disk; raise if file is missing."""
     chunks_path, _ = _resolve_paths(cfg, "", chunking)
     if not Path(chunks_path).exists():
@@ -65,9 +63,7 @@ def _load_chunks(
     return texts, chunk_ids
 
 
-def _load_embeddings(
-    cfg: CrawlConfig, n_chunks: int, *, embed_key: str, chunking: str = "fixed"
-):
+def _load_embeddings(cfg: CrawlConfig, n_chunks: int, *, embed_key: str, chunking: str = "fixed"):
     import numpy as np
 
     _, emb_path = _resolve_paths(cfg, embed_key, chunking)
@@ -91,7 +87,9 @@ def _load_embeddings(
 
 
 def main():
-    ap = argparse.ArgumentParser(description="RAG pipeline – dense / sparse / rrf")
+    ap = argparse.ArgumentParser(
+        description="RAG pipeline – dense / sparse / rrf"
+    )
     ap.add_argument(
         "--question", type=str, default=None, help="Ask a single question and exit."
     )
@@ -137,13 +135,8 @@ def main():
     ap.add_argument(
         "--reader-model",
         type=str,
-        default="google/gemma-3-12b-it",
+        default="Qwen/Qwen2.5-1.5B-Instruct",
         help="HF model name for the reader.",
-    )
-    ap.add_argument(
-        "--load-in-4bit",
-        action="store_true",
-        help="Load reader model in 4-bit (for Colab T4 / limited VRAM). Requires bitsandbytes.",
     )
     ap.add_argument("--max-new-tokens", type=int, default=256)
     ap.add_argument(
@@ -162,11 +155,7 @@ def main():
 
     try:
         import numpy as np
-        from rag_utils.dense_retriever import (
-            build_faiss_index,
-            dense_search,
-            embed_query,
-        )
+        from rag_utils.dense_retriever import build_faiss_index, dense_search, embed_query
         from rag_utils.hybrid_retrieval import rrf_single
         from rag_utils.reader import answer_question
         from rag_utils.sparse_retriever import SparseRetriever
@@ -185,15 +174,12 @@ def main():
     faiss_index = None
     id_arr = None
     if args.mode in ("dense", "rrf"):
-        embeddings = _load_embeddings(
-            cfg, len(texts), embed_key=args.embed, chunking=args.chunking
-        )
+        embeddings = _load_embeddings(cfg, len(texts), embed_key=args.embed,
+                                      chunking=args.chunking)
         id_arr = np.array(chunk_ids)
         faiss_index = build_faiss_index(embeddings)
 
-    print(
-        f"\nMode={args.mode} | Embed={args.embed} | Chunking={args.chunking} | top_k={args.top_k}\n"
-    )
+    print(f"\nMode={args.mode} | Embed={args.embed} | Chunking={args.chunking} | top_k={args.top_k}\n")
 
     def retrieve(q: str) -> list[dict]:
         """Run the selected retrieval mode for a single query."""
@@ -206,9 +192,7 @@ def main():
             return dense_search(faiss_index, q_emb, id_arr, texts, top_k=args.top_k)[0]
 
         # rrf – need both retrievers
-        dense_res = dense_search(
-            faiss_index, q_emb, id_arr, texts, top_k=args.candidate_k
-        )[0]
+        dense_res = dense_search(faiss_index, q_emb, id_arr, texts, top_k=args.candidate_k)[0]
         sparse_res = sparse.search(q, top_k=args.candidate_k)
         return rrf_single(dense_res, sparse_res, top_k=args.top_k, k=args.rrf_k)
 
@@ -218,7 +202,6 @@ def main():
             q,
             retrieved,
             model_name=args.reader_model,
-            load_in_4bit=args.load_in_4bit,
             max_new_tokens=args.max_new_tokens,
             max_context_chars=args.max_context_chars,
         )
