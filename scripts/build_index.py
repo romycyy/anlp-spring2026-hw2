@@ -5,6 +5,11 @@ Mirrors the reference repo's embeder.py, adapted for this project's layout.
 Usage:
   python3 scripts/build_index.py --embed sentence-transformers
   python3 scripts/build_index.py --embed BAAI
+
+Shorter, more relevant chunks (reduce length, improve precision):
+  - Fixed:  --chunking fixed --chunk-size 100 --chunk-overlap 20
+  - Semantic: --chunking semantic --chunk-size 100 --semantic-percentile 85
+  - Sentence: --chunking sentence --sentences-per-chunk 3  (recommended for relevance)
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ import numpy as np  # noqa: E402
 
 from data_prep.config import CrawlConfig  # noqa: E402
 from data_prep.utils import ensure_dir, read_jsonl, write_jsonl  # noqa: E402
-from rag_utils.chunking import chunk_text, semantic_chunk_text  # noqa: E402
+from rag_utils.chunking import chunk_text, semantic_chunk_text, sentence_chunk_text  # noqa: E402
 from rag_utils.dense_retriever import embed_texts  # noqa: E402
 
 _EMBED_MODEL_MAP = {
@@ -44,17 +49,19 @@ def main():
         "--chunking",
         type=str,
         default="fixed",
-        choices=["fixed", "semantic"],
-        help="Chunking strategy: 'fixed' (token-based) or 'semantic' (embedding-based).",
+        choices=["fixed", "semantic", "sentence"],
+        help="Chunking: 'fixed' (tokens), 'semantic' (embedding boundaries), 'sentence' (N sentences).",
     )
     ap.add_argument("--chunk-size", type=int, default=200,
-                    help="Max tokens per chunk (fixed) / hard cap (semantic).")
+                    help="Max tokens per chunk (fixed/semantic) or sentences per chunk (sentence).")
     ap.add_argument("--chunk-overlap", type=int, default=50,
                     help="Token overlap between chunks (fixed chunking only).")
     ap.add_argument("--semantic-buffer", type=int, default=1,
                     help="Sentence buffer size for context windows (semantic chunking).")
     ap.add_argument("--semantic-percentile", type=int, default=95,
                     help="Breakpoint percentile threshold (semantic chunking).")
+    ap.add_argument("--sentences-per-chunk", type=int, default=3,
+                    help="Sentences per chunk when --chunking sentence (short, focused chunks).")
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument(
         "--rebuild",
@@ -70,6 +77,8 @@ def main():
     chunks_path = cfg.rag_chunks_path
     if args.chunking == "semantic":
         chunks_path = cfg.rag_chunks_path.replace(".jsonl", "_semantic.jsonl")
+    elif args.chunking == "sentence":
+        chunks_path = cfg.rag_chunks_path.replace(".jsonl", "_sentence.jsonl")
 
     emb_path = cfg.rag_embeddings_path.replace(
         ".npy", f"_{args.embed}_{args.chunking}.npy"
@@ -112,6 +121,11 @@ def main():
                     buffer_size=args.semantic_buffer,
                     breakpoint_percentile=args.semantic_percentile,
                     max_chunk_tokens=args.chunk_size,
+                )
+            elif args.chunking == "sentence":
+                chunks = sentence_chunk_text(
+                    text,
+                    sentences_per_chunk=args.sentences_per_chunk,
                 )
             else:
                 chunks = chunk_text(

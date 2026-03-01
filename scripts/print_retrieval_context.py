@@ -33,6 +33,8 @@ def _resolve_paths(cfg: CrawlConfig, embed_key: str, chunking: str) -> tuple[str
     chunks_path = cfg.rag_chunks_path
     if chunking == "semantic":
         chunks_path = cfg.rag_chunks_path.replace(".jsonl", "_semantic.jsonl")
+    elif chunking == "sentence":
+        chunks_path = cfg.rag_chunks_path.replace(".jsonl", "_sentence.jsonl")
     emb_path = cfg.rag_embeddings_path.replace(".npy", f"_{embed_key}_{chunking}.npy")
     return chunks_path, emb_path
 
@@ -116,7 +118,7 @@ def main():
         "--chunking",
         type=str,
         default="fixed",
-        choices=["fixed", "semantic"],
+        choices=["fixed", "semantic", "sentence"],
         help="Chunking strategy.",
     )
     ap.add_argument("--top-k", type=int, default=5, help="Number of chunks to show.")

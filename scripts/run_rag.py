@@ -46,7 +46,9 @@ def _resolve_paths(cfg: CrawlConfig, embed_key: str, chunking: str) -> tuple[str
     return chunks_path, emb_path
 
 
-def _load_chunks(cfg: CrawlConfig, chunking: str = "fixed") -> tuple[list[str], list[str]]:
+def _load_chunks(
+    cfg: CrawlConfig, chunking: str = "fixed"
+) -> tuple[list[str], list[str]]:
     """Return (texts, chunk_ids) loaded from disk; raise if file is missing."""
     chunks_path, _ = _resolve_paths(cfg, "", chunking)
     if not Path(chunks_path).exists():
@@ -63,7 +65,9 @@ def _load_chunks(cfg: CrawlConfig, chunking: str = "fixed") -> tuple[list[str], 
     return texts, chunk_ids
 
 
-def _load_embeddings(cfg: CrawlConfig, n_chunks: int, *, embed_key: str, chunking: str = "fixed"):
+def _load_embeddings(
+    cfg: CrawlConfig, n_chunks: int, *, embed_key: str, chunking: str = "fixed"
+):
     import numpy as np
 
     _, emb_path = _resolve_paths(cfg, embed_key, chunking)
@@ -87,9 +91,7 @@ def _load_embeddings(cfg: CrawlConfig, n_chunks: int, *, embed_key: str, chunkin
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="RAG pipeline – dense / sparse / rrf"
-    )
+    ap = argparse.ArgumentParser(description="RAG pipeline – dense / sparse / rrf")
     ap.add_argument(
         "--question", type=str, default=None, help="Ask a single question and exit."
     )
@@ -181,6 +183,7 @@ def main():
         from rag_utils.hybrid_retrieval import rrf_single
         from rag_utils.reader import answer_question
         from rag_utils.sparse_retriever import SparseRetriever
+
         if args.rerank:
             from rag_utils.reranker import rerank
     except Exception as e:
@@ -198,21 +201,30 @@ def main():
     faiss_index = None
     id_arr = None
     if args.mode in ("dense", "rrf"):
-        embeddings = _load_embeddings(cfg, len(texts), embed_key=args.embed,
-                                      chunking=args.chunking)
+        embeddings = _load_embeddings(
+            cfg, len(texts), embed_key=args.embed, chunking=args.chunking
+        )
         id_arr = np.array(chunk_ids)
         faiss_index = build_faiss_index(embeddings)
 
     rerank_k = args.rerank_top_k if args.rerank else args.top_k
     retrieve_top_k = args.rerank_top_k if args.rerank else args.top_k
     if args.mode in ("dense", "rrf"):
-        candidate_k = max(args.candidate_k, retrieve_top_k) if args.mode == "rrf" else retrieve_top_k
+        candidate_k = (
+            max(args.candidate_k, retrieve_top_k)
+            if args.mode == "rrf"
+            else retrieve_top_k
+        )
     else:
         candidate_k = retrieve_top_k
 
     print(
         f"\nMode={args.mode} | Embed={args.embed} | Chunking={args.chunking} | top_k={args.top_k}"
-        + (f" | rerank={args.rerank} (rerank_top_k={args.rerank_top_k})" if args.rerank else "")
+        + (
+            f" | rerank={args.rerank} (rerank_top_k={args.rerank_top_k})"
+            if args.rerank
+            else ""
+        )
         + "\n"
     )
 
@@ -221,13 +233,23 @@ def main():
         if args.mode == "sparse":
             out = sparse.search(q, top_k=retrieve_top_k)
         else:
-            emb = q_emb if q_emb is not None else embed_query(q, model_name=_EMBED_MODEL_MAP[args.embed])
+            emb = (
+                q_emb
+                if q_emb is not None
+                else embed_query(q, model_name=_EMBED_MODEL_MAP[args.embed])
+            )
             if args.mode == "dense":
-                out = dense_search(faiss_index, emb, id_arr, texts, top_k=retrieve_top_k)[0]
+                out = dense_search(
+                    faiss_index, emb, id_arr, texts, top_k=retrieve_top_k
+                )[0]
             else:
-                dense_res = dense_search(faiss_index, emb, id_arr, texts, top_k=candidate_k)[0]
+                dense_res = dense_search(
+                    faiss_index, emb, id_arr, texts, top_k=candidate_k
+                )[0]
                 sparse_res = sparse.search(q, top_k=candidate_k)
-                out = rrf_single(dense_res, sparse_res, top_k=retrieve_top_k, k=args.rrf_k)
+                out = rrf_single(
+                    dense_res, sparse_res, top_k=retrieve_top_k, k=args.rrf_k
+                )
 
         if args.rerank and out:
             out = rerank(q, out, top_k=args.top_k, model_name=args.rerank_model)
@@ -259,14 +281,8 @@ def main():
         with open(args.queries_file, "r", encoding="utf-8") as f:
             queries = json.load(f)
 
-        items = [
-            x for x in queries
-            if x.get("question") or x.get("query")
-        ]
-        questions = [
-            (x.get("question") or x.get("query", "")).strip()
-            for x in items
-        ]
+        items = [x for x in queries if x.get("question") or x.get("query")]
+        questions = [(x.get("question") or x.get("query", "")).strip() for x in items]
         query_embs_batch = None
         if items and args.mode in ("dense", "rrf"):
             print("Batch embedding queries…")
@@ -280,7 +296,9 @@ def main():
             qid = str(item.get("id", item.get("qid", "")))
             question = questions[i]
             print(f"[{qid}] {question}")
-            q_emb = query_embs_batch[i : i + 1] if query_embs_batch is not None else None
+            q_emb = (
+                query_embs_batch[i : i + 1] if query_embs_batch is not None else None
+            )
             retrieved = retrieve(question, q_emb=q_emb)
             ans = answer_question(
                 question,

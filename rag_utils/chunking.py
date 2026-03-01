@@ -32,6 +32,30 @@ def _split_sentences(text: str) -> List[str]:
     return [s.strip() for s in parts if s.strip()]
 
 
+def sentence_chunk_text(
+    text: str,
+    *,
+    sentences_per_chunk: int = 3,
+) -> List[str]:
+    """Split text into short chunks of N sentences each.
+
+    Produces smaller, more focused chunks than fixed token windows, which often
+    improves retrieval relevance (one idea per chunk, less irrelevant text).
+    Use with smaller sentences_per_chunk (2–4) for higher precision.
+    """
+    if sentences_per_chunk <= 0:
+        raise ValueError(f"sentences_per_chunk must be > 0 (got {sentences_per_chunk})")
+    sentences = _split_sentences(text)
+    if not sentences:
+        return [text.strip()] if text.strip() else []
+    chunks = []
+    for i in range(0, len(sentences), sentences_per_chunk):
+        chunk = " ".join(sentences[i : i + sentences_per_chunk])
+        if chunk.strip():
+            chunks.append(chunk)
+    return chunks
+
+
 def semantic_chunk_text(
     text: str,
     *,
@@ -87,14 +111,17 @@ def semantic_chunk_text(
 
     if model is None:
         model = SentenceTransformer(embed_model)
-    embs = model.encode(combined, show_progress_bar=False, convert_to_numpy=True,
-                        normalize_embeddings=True)
+    embs = model.encode(
+        combined,
+        show_progress_bar=False,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    )
 
     # Cosine distance between consecutive windows (1 − dot since L2-normalised).
-    dists = np.array([
-        1.0 - float(np.dot(embs[i], embs[i + 1]))
-        for i in range(len(embs) - 1)
-    ])
+    dists = np.array(
+        [1.0 - float(np.dot(embs[i], embs[i + 1])) for i in range(len(embs) - 1)]
+    )
 
     threshold = float(np.percentile(dists, breakpoint_percentile))
 
@@ -114,7 +141,9 @@ def semantic_chunk_text(
     for ch in raw_chunks:
         if len(ch.split()) > max_chunk_tokens:
             final_chunks.extend(
-                chunk_text(ch, chunk_size=max_chunk_tokens, overlap=max_chunk_tokens // 10)
+                chunk_text(
+                    ch, chunk_size=max_chunk_tokens, overlap=max_chunk_tokens // 10
+                )
             )
         else:
             final_chunks.append(ch)
