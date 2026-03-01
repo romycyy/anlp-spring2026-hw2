@@ -1,4 +1,4 @@
-"""Dense retrieval: sentence-transformers or BAAI/bge-m3 with a FAISS index."""
+"""Dense retrieval: sentence-transformers, BAAI/bge-m3, or NovaSearch/stella with a FAISS index."""
 
 from __future__ import annotations
 
@@ -8,6 +8,13 @@ import numpy as np
 
 _DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 _BAAI_MODEL_NAME = "BAAI/bge-m3"
+
+# Models that require trust_remote_code=True when loading via SentenceTransformer.
+_TRUST_REMOTE_CODE_MODELS: set[str] = {"NovaSearch/stella_en_1.5B_v5"}
+
+# Prompt name to use when encoding *queries* (not documents) for models that need it.
+# Stella uses "s2p_query" (sentence-to-passage) for retrieval; documents need no prompt.
+_QUERY_PROMPT_NAMES: dict[str, str] = {"NovaSearch/stella_en_1.5B_v5": "s2p_query"}
 
 _dense_model = None
 _loaded_model_name: Optional[str] = None
@@ -21,7 +28,8 @@ _loaded_model_name: Optional[str] = None
 def _load_sentence_transformer(model_name: str):
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(model_name)
+    trust_remote_code = model_name in _TRUST_REMOTE_CODE_MODELS
+    return SentenceTransformer(model_name, trust_remote_code=trust_remote_code)
 
 
 def get_dense_model(model_name: str = _DEFAULT_MODEL_NAME):
@@ -40,16 +48,20 @@ def get_dense_model(model_name: str = _DEFAULT_MODEL_NAME):
 # ---------------------------------------------------------------------------
 
 
-def _encode_batch_st(model, texts: list[str], normalize: bool = True) -> np.ndarray:
-    return np.asarray(
-        model.encode(
-            texts,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-            normalize_embeddings=normalize,
-        ),
-        dtype=np.float32,
+def _encode_batch_st(
+    model,
+    texts: list[str],
+    normalize: bool = True,
+    prompt_name: Optional[str] = None,
+) -> np.ndarray:
+    kwargs: dict = dict(
+        show_progress_bar=False,
+        convert_to_numpy=True,
+        normalize_embeddings=normalize,
     )
+    if prompt_name is not None:
+        kwargs["prompt_name"] = prompt_name
+    return np.asarray(model.encode(texts, **kwargs), dtype=np.float32)
 
 
 def embed_texts(
@@ -60,7 +72,7 @@ def embed_texts(
     show_progress_bar: bool = True,
     normalize: bool = True,
 ) -> np.ndarray:
-    """Encode corpus chunks -> (N, dim) float32 array."""
+    """Encode corpus chunks -> (N, dim) float32 array. No query prompt is used."""
     if not texts:
         raise ValueError("embed_texts received an empty list — no chunks to embed.")
     model = get_dense_model(model_name)
@@ -78,9 +90,12 @@ def embed_texts(
 
 
 def embed_query(query: str, *, model_name: str = _DEFAULT_MODEL_NAME) -> np.ndarray:
-    """Encode a single query -> (1, dim) float32 array."""
+    """Encode a single query -> (1, dim) float32 array.
+    Uses the model's query prompt if defined (e.g. stella's s2p_query).
+    """
     model = get_dense_model(model_name)
-    emb = _encode_batch_st(model, [query], normalize=True)
+    prompt_name = _QUERY_PROMPT_NAMES.get(model_name)
+    emb = _encode_batch_st(model, [query], normalize=True, prompt_name=prompt_name)
     return emb.astype(np.float32)
 
 
@@ -90,14 +105,17 @@ def embed_queries(
     model_name: str = _DEFAULT_MODEL_NAME,
     batch_size: int = 32,
 ) -> np.ndarray:
-    """Encode multiple queries -> (N, dim) float32 array. More efficient than repeated embed_query."""
+    """Encode multiple queries -> (N, dim) float32 array. More efficient than repeated embed_query.
+    Uses the model's query prompt if defined (e.g. stella's s2p_query).
+    """
     if not queries:
         raise ValueError("embed_queries received an empty list.")
     model = get_dense_model(model_name)
+    prompt_name = _QUERY_PROMPT_NAMES.get(model_name)
     all_embs: list[np.ndarray] = []
     for i in range(0, len(queries), batch_size):
         batch = queries[i : i + batch_size]
-        emb = _encode_batch_st(model, batch, normalize=True)
+        emb = _encode_batch_st(model, batch, normalize=True, prompt_name=prompt_name)
         all_embs.append(emb)
     return np.vstack(all_embs).astype(np.float32)
 

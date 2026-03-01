@@ -29,6 +29,7 @@ from data_prep.utils import ensure_dir, read_jsonl  # noqa: E402
 _EMBED_MODEL_MAP = {
     "sentence-transformers": "sentence-transformers/all-MiniLM-L6-v2",
     "BAAI": "BAAI/bge-m3",
+    "stella": "NovaSearch/stella_en_1.5B_v5",
 }
 
 
@@ -114,7 +115,7 @@ def main():
         "--embed",
         type=str,
         default="sentence-transformers",
-        choices=["sentence-transformers", "BAAI"],
+        choices=["sentence-transformers", "BAAI", "stella"],
         help="Embedding model to use.",
     )
     ap.add_argument(
