@@ -138,3 +138,65 @@ The following changes are implemented in code:
 - **Context sorted by score** in `reader._build_context()`.
 
 You can then tune re-ranker choice, RRF k, candidate_k, and reader prompt/max_new_tokens on the leaderboard or your dev set.
+
+---
+
+## How to run for optimal results
+
+### Step 1: Build the index (`build_index.py`)
+
+**Important:** The `--embed` and `--chunking` you use here must match what you pass to `run_rag.py`, or the script will not find the correct chunks/embeddings.
+
+**Recommended (best quality):** BAAI/bge-m3 + fixed chunking (faster) or semantic (often better coherence).
+
+```bash
+# Option A – Best retrieval quality, moderate speed (default chunk size 200)
+python3 scripts/build_index.py --embed BAAI --chunking fixed
+
+# Option B – Semantic chunks (better boundaries), same embed; use --rebuild to regenerate chunks
+python3 scripts/build_index.py --embed BAAI --chunking semantic --rebuild
+
+# Option C – Fast baseline (MiniLM, fixed chunks)
+python3 scripts/build_index.py --embed sentence-transformers --chunking fixed
+```
+
+Optional: try larger chunks for more context (e.g. `--chunk-size 300 --chunk-overlap 60`). Re-run with `--rebuild` if you change chunking or chunk size.
+
+### Step 2: Run RAG (`run_rag.py`)
+
+**Recommended (optimal quality):** Hybrid retrieval (RRF) + cross-encoder re-ranking, with the same embed and chunking as in Step 1.
+
+```bash
+# Single question
+python3 scripts/run_rag.py --question "When was Carnegie Mellon University founded?" \
+  --mode rrf --embed BAAI --chunking fixed --rerank --rerank-top-k 20 --top-k 5
+
+# Batch (e.g. leaderboard) – same settings; queries are batch-embedded automatically
+python3 scripts/run_rag.py --queries-file leaderboard_queries.json \
+  --mode rrf --embed BAAI --chunking fixed --rerank --rerank-top-k 20 --top-k 5 \
+  --output system_outputs/system_output_optimal.json
+```
+
+**If you built the index with semantic chunking:**
+
+```bash
+python3 scripts/run_rag.py --queries-file leaderboard_queries.json \
+  --mode rrf --embed BAAI --chunking semantic --rerank --rerank-top-k 20 --top-k 5
+```
+
+**Faster / lighter run (no reranker, MiniLM):**
+
+```bash
+python3 scripts/build_index.py --embed sentence-transformers --chunking fixed
+python3 scripts/run_rag.py --queries-file leaderboard_queries.json \
+  --mode rrf --embed sentence-transformers --chunking fixed
+```
+
+### Parameter summary
+
+| Goal              | build_index.py                    | run_rag.py                                           |
+|-------------------|-----------------------------------|------------------------------------------------------|
+| Best quality      | `--embed BAAI --chunking fixed` or `semantic` | `--mode rrf --embed BAAI --chunking fixed` (or semantic) `--rerank --rerank-top-k 20 --top-k 5` |
+| Match your index  | (same as you already ran)         | `--embed` and `--chunking` must match build_index    |
+| Faster / smaller  | `--embed sentence-transformers`   | Omit `--rerank`; optional `--embed sentence-transformers` |
+| Tuning            | `--chunk-size 300 --chunk-overlap 60` | `--candidate-k 30 --rrf-k 60` (try 40 or 80 for RRF k) |

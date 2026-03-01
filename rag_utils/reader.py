@@ -21,20 +21,20 @@ MAX_CONTEXT_CHARS: int = 10_000
 # Prompt template from reference repo: explicit reasoning steps.
 PROMPT_TEMPLATE = """\
 Your task:
-1. Carefully read the question and the retrieved information below.
-2. Determine whether the retrieved information contains relevant or correct answers.
-3. If it does, use it to support your answer.
-4. If it does not, rely on your own knowledge to answer accurately.
-5. Do not mix irrelevant facts from the retrieved text.
+1. Read the question and the retrieved context carefully.
+2. Use ONLY the retrieved information if it sufficiently answers the question.
+3. If the retrieved context is missing or irrelevant, answer based on your reliable external knowledge.
+4. Do NOT introduce unrelated facts or hallucinate.
+5. Answer clearly and concisely in English.
 
 Question:
 {question}
 
-Retrieved Information:
+Retrieved Context:
 {context}
 
-Answer (clearly indicate if your answer is based on retrieval or your own knowledge):
-Please show your final answer only. Do not show reasoning steps.
+Answer:
+Provide the final answer below. Do not show your reasoning steps.
 """
 
 _tokenizer = None
